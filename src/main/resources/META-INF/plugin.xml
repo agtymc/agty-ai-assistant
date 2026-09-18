@@ -1,0 +1,21 @@
+<idea-plugin>
+    <id>org.agty.aiassistant</id>
+    <name>AGTY AI Assistant</name>
+    <version>0.10.2</version>
+    <idea-version since-build="253" until-build="253.*"/>
+    <vendor>AGTY</vendor>
+    <description><![CDATA[
+        Chat with multiple AI providers from IntelliJ IDEA. Codex CLI is the first supported provider.
+        Configure providers under Settings | Tools | AGTY AI Assistant.
+    ]]></description>
+    <depends>com.intellij.modules.platform</depends>
+    <extensions defaultExtensionNs="com.intellij">
+        <applicationConfigurable parentId="tools" id="org.agty.aiassistant.settings"
+            displayName="AGTY AI Assistant"
+            instance="org.agty.aiassistant.settings.CodexConfigurable"/>
+        <applicationConfigurable parentId="org.agty.aiassistant.settings" id="org.agty.aiassistant.appearance"
+            displayName="Оформление чата" instance="org.agty.aiassistant.settings.ChatAppearanceConfigurable"/>
+        <toolWindow id="AGTY AI Assistant" anchor="right" icon="/icons/agty.svg"
+            factoryClass="org.agty.aiassistant.ui.AiAssistantToolWindowFactory"/>
+    </extensions>
+</idea-plugin>

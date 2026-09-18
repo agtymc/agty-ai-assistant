@@ -1,0 +1,28 @@
+AGENTS.md
+.gradle/
+.intellijPlatform/
+build/
+.idea/
+*.iml
+local.properties
+
+# Local Codex/agent scratch files
+\!files/
+.agents/
+.codex/
+.env
+.env.*
+*.key
+*.pem
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Runtime logs and packaged artifacts outside Gradle build/
+*.log
+*.zip
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
