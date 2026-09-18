@@ -2,19 +2,30 @@ package org.agty.aiassistant.ui;
 
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.command.CommandProcessor;
+import com.intellij.openapi.fileChooser.FileChooser;
+import com.intellij.openapi.fileChooser.FileChooserDescriptor;
+import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.options.ShowSettingsUtil;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.IconLoader;
+import com.intellij.openapi.vfs.LocalFileSystem;
+import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.components.JBScrollPane;
 import com.intellij.ui.components.JBTextArea;
 import com.intellij.util.ui.JBUI;
+import org.agty.aiassistant.changes.ChangeSet;
 import org.agty.aiassistant.core.*;
 import org.agty.aiassistant.chat.*;
+import org.agty.aiassistant.context.CollectedContext;
+import org.agty.aiassistant.context.ContextItem;
+import org.agty.aiassistant.context.ProjectContextCollector;
 import java.util.LinkedHashMap;
 import java.util.UUID;
 import java.util.function.Supplier;
 import org.agty.aiassistant.settings.CodexSettings;
 import org.agty.aiassistant.settings.ChatAppearance;
+import org.agty.aiassistant.security.ProjectAccessPolicy;
 import com.intellij.openapi.ui.Messages;
 
 import javax.swing.*;
@@ -35,6 +46,11 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
     private final JButton send = new JButton("Отправить");
     private final JButton stop = new JButton("Остановить");
     private final JButton statusButton = new JButton("Status");
+    private final JCheckBox includeContext = new JCheckBox("Контекст", true);
+    private final JButton addContextButton = new JButton("+");
+    private final JButton contextButton = new JButton("Просмотр");
+    private final JButton clearContextButton = new JButton("×");
+    private final JButton reviewButton = new JButton("Review");
     private final JButton clear = new JButton("Новая сессия");
     private final com.intellij.openapi.ui.ComboBox<ChatProviderRegistry.Choice> providerPicker = new com.intellij.openapi.ui.ComboBox<>() {
         @Override public int getMinimumPopupWidth() {
@@ -68,6 +84,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
     private final Runnable appearanceListener = this::applyAppearance;
     private final JProgressBar progress = new JProgressBar();
     private final StringBuilder history = new StringBuilder();
+    private final java.util.List<ContextItem> pinnedContext = new java.util.ArrayList<>();
     private ChatProvider.Request active;
     private String activeRequestId = "";
     private String pendingQuestion = "";
@@ -173,8 +190,24 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         statusButton.setName("status-command");
         statusButton.setToolTipText("Показать /status текущей сессии");
         statusButton.addActionListener(e -> executeCommand(new SlashCommands.Invocation("/status", "")));
+        includeContext.setName("include-context");
+        includeContext.setToolTipText("Добавлять активный файл или выделение к следующему запросу");
+        includeContext.addActionListener(e -> updateContextLabel());
+        addContextButton.setName("add-context");
+        addContextButton.setToolTipText("Добавить источник в контекст");
+        addContextButton.addActionListener(e -> contextSourceMenu().show(addContextButton, 0, addContextButton.getHeight()));
+        contextButton.setName("context-preview");
+        contextButton.setToolTipText("Показать список контекста перед отправкой");
+        contextButton.addActionListener(e -> showContextPreview());
+        clearContextButton.setName("clear-context");
+        clearContextButton.setToolTipText("Очистить список контекста");
+        clearContextButton.addActionListener(e -> clearContextItems());
+        reviewButton.setName("diff-review");
+        reviewButton.setToolTipText("Проверить и применить unified diff");
+        reviewButton.addActionListener(e -> showDiffReviewDialog());
         JPanel contextActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
-        contextActions.add(access); contextActions.add(statusButton);
+        contextActions.add(includeContext); contextActions.add(addContextButton); contextActions.add(contextButton);
+        contextActions.add(clearContextButton); contextActions.add(reviewButton); contextActions.add(access); contextActions.add(statusButton);
         context.add(contextActions, BorderLayout.EAST); bottom.add(context, BorderLayout.NORTH);
         bottom.add(editor, BorderLayout.CENTER);
         for (var choice : providers) providerPicker.addItem(choice);
@@ -271,6 +304,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
             @Override public void actionPerformed(java.awt.event.ActionEvent event) { navigateHistory(1); }
         });
         updateHistoryNavigation();
+        updateContextLabel();
         refreshSessions();
         loadSession();
         ChatAppearance.getInstance().addListener(appearanceListener);
@@ -686,7 +720,12 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         if (question.isBlank()) return;
         String root = project.getBasePath();
         if (root == null) { status.setText("Откройте локальный проект."); return; }
-        if (Files.exists(Path.of(root, ".noai"))) { status.setText("AI отключён файлом .noai."); return; }
+        final Path rootPath = Path.of(root);
+        final ProjectAccessPolicy policy;
+        try { policy = new ProjectAccessPolicy(rootPath); }
+        catch (RuntimeException e) { status.setText(e.getMessage()); return; }
+        ProjectAccessPolicy.Verdict accessVerdict = policy.request(sessions.writeAccess);
+        if (!accessVerdict.allowed()) { status.setText(accessVerdict.message()); return; }
         if ((session.remoteId().isEmpty() ? history.length() : 0) + question.length() > MAX_HISTORY) {
             status.setText("Лимит диалога 100 000 символов. Начните новый диалог или сократите запрос.");
             return;
@@ -703,6 +742,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         }
         catch (RuntimeException e) { status.setText(e.getMessage()); return; }
         final boolean writeAccess = sessions.writeAccess;
+        CollectedContext requestContext = requestContext(rootPath, policy);
         String prompt = "You are assisting inside IntelliJ IDEA. Answer in the user's language. "
                 + (writeAccess ? "Current access mode permits modifying files within the project directory to complete the user request. "
                     : "Current access mode is read-only. Do not modify files. ")
@@ -710,6 +750,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
                 + "Link source locations using [method or file](relative/path/File.java#L42), with real line numbers. "
                 + "Give brief user-facing progress updates while working, when supported. "
                 + "The following is conversation context, followed by the current user request.\n\n"
+                + requestContext.promptBlock()
                 + (session.remoteId().isEmpty() ? history : "") + "\nUSER:\n" + question;
         final ChatProvider.Request run;
         boolean forkForModel = session.providerId.equals("codex") && !session.remoteId().isEmpty()
@@ -739,7 +780,8 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
             String outcome;
             boolean success = false;
             try {
-                run.run(Path.of(root), prompt, event -> {
+                policy.request(writeAccess).requireAllowed();
+                run.run(rootPath, prompt, event -> {
                     switch (event.kind()) {
                         case MODEL -> ui(run, () -> {
                             session.effectiveModel = event.text();
@@ -800,6 +842,211 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         });
     }
 
+    private void showContextPreview() {
+        if (project.getBasePath() == null) { status.setText("Откройте локальный проект."); return; }
+        Path root = Path.of(project.getBasePath());
+        final ProjectAccessPolicy policy;
+        try { policy = new ProjectAccessPolicy(root); }
+        catch (RuntimeException e) { status.setText(e.getMessage()); return; }
+        CollectedContext context = includeContext.isSelected()
+                ? previewContext(root, policy)
+                : CollectedContext.empty("Контекст отключён для следующего запроса.");
+        JTextArea area = new JTextArea(context.preview(), 24, 86);
+        area.setEditable(false);
+        area.setLineWrap(false);
+        area.setCaretPosition(0);
+        JScrollPane scroll = new JScrollPane(area);
+        scroll.setPreferredSize(JBUI.size(720, 420));
+        JOptionPane.showMessageDialog(this, scroll, "Контекст следующего запроса", JOptionPane.PLAIN_MESSAGE);
+    }
+
+    private void addCurrentContext() {
+        if (project.getBasePath() == null) { status.setText("Откройте локальный проект."); return; }
+        Path root = Path.of(project.getBasePath());
+        final ProjectAccessPolicy policy;
+        try { policy = new ProjectAccessPolicy(root); }
+        catch (RuntimeException e) { status.setText(e.getMessage()); return; }
+        CollectedContext collected = ProjectContextCollector.currentEditor(project, root, policy);
+        addCollectedContext(collected);
+    }
+
+    private void addFilesContext() {
+        if (project.getBasePath() == null) { status.setText("Откройте локальный проект."); return; }
+        FileChooserDescriptor descriptor = new FileChooserDescriptor(true, false, false, false, false, true)
+                .withTitle("Добавить файлы в AI-контекст")
+                .withDescription("Выберите один или несколько текстовых файлов проекта.");
+        java.util.List<com.intellij.openapi.vfs.VirtualFile> files = java.util.List.of(FileChooser.chooseFiles(descriptor, project, null));
+        if (files.isEmpty()) return;
+        Path root = Path.of(project.getBasePath());
+        final ProjectAccessPolicy policy;
+        try { policy = new ProjectAccessPolicy(root); }
+        catch (RuntimeException e) { status.setText(e.getMessage()); return; }
+        addCollectedContext(ProjectContextCollector.files(root, policy, files));
+    }
+
+    private void addDiagnosticsContext() {
+        if (project.getBasePath() == null) { status.setText("Откройте локальный проект."); return; }
+        Path root = Path.of(project.getBasePath());
+        final ProjectAccessPolicy policy;
+        try { policy = new ProjectAccessPolicy(root); }
+        catch (RuntimeException e) { status.setText(e.getMessage()); return; }
+        addCollectedContext(ProjectContextCollector.diagnostics(project, root, policy));
+    }
+
+    private void addGitDiffContext() {
+        if (project.getBasePath() == null) { status.setText("Откройте локальный проект."); return; }
+        Path root = Path.of(project.getBasePath());
+        final ProjectAccessPolicy policy;
+        try { policy = new ProjectAccessPolicy(root); }
+        catch (RuntimeException e) { status.setText(e.getMessage()); return; }
+        status.setText("Собираю Git diff…");
+        ApplicationManager.getApplication().executeOnPooledThread(() -> {
+            CollectedContext collected = ProjectContextCollector.gitDiff(root, policy);
+            ApplicationManager.getApplication().invokeLater(() -> {
+                if (!disposed && !project.isDisposed()) addCollectedContext(collected);
+            });
+        });
+    }
+
+    private JPopupMenu contextSourceMenu() {
+        JPopupMenu menu = new JPopupMenu();
+        JMenuItem editor = new JMenuItem("Активный редактор");
+        editor.addActionListener(e -> addCurrentContext());
+        JMenuItem files = new JMenuItem("Файлы проекта…");
+        files.addActionListener(e -> addFilesContext());
+        JMenuItem diagnostics = new JMenuItem("Диагностики редактора");
+        diagnostics.addActionListener(e -> addDiagnosticsContext());
+        JMenuItem diff = new JMenuItem("Git diff");
+        diff.addActionListener(e -> addGitDiffContext());
+        menu.add(editor); menu.add(files); menu.add(diagnostics); menu.add(diff);
+        return menu;
+    }
+
+    private void addCollectedContext(CollectedContext collected) {
+        if (collected.items().isEmpty()) {
+            status.setText(collected.notes().isEmpty() ? "Контекст не добавлен." : collected.notes().getFirst());
+            return;
+        }
+        for (ContextItem item : collected.items()) {
+            pinnedContext.removeIf(existing -> existing.location().equals(item.location()));
+            pinnedContext.add(item);
+        }
+        includeContext.setSelected(true);
+        updateContextLabel();
+        status.setText("Контекст добавлен: " + collected.items().getFirst().location());
+    }
+
+    private void clearContextItems() {
+        pinnedContext.clear();
+        updateContextLabel();
+        status.setText("Список контекста очищен.");
+    }
+
+    private void showDiffReviewDialog() {
+        if (project.getBasePath() == null) { status.setText("Откройте локальный проект."); return; }
+        JTextArea input = new JTextArea(24, 92);
+        input.setLineWrap(false);
+        JScrollPane inputScroll = new JScrollPane(input);
+        inputScroll.setPreferredSize(JBUI.size(820, 460));
+        int entered = JOptionPane.showConfirmDialog(this, inputScroll, "Unified diff для review", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (entered != JOptionPane.OK_OPTION || input.getText().isBlank()) return;
+        reviewAndApplyDiff(input.getText(), Path.of(project.getBasePath()));
+    }
+
+    private void reviewAndApplyDiff(String diff, Path root) {
+        final ProjectAccessPolicy policy;
+        try { policy = new ProjectAccessPolicy(root); }
+        catch (RuntimeException e) { status.setText(e.getMessage()); return; }
+        ChangeSet skeleton = ChangeSet.fromUnifiedDiff(diff, java.util.Map.of());
+        if (skeleton.isEmpty()) { status.setText("Unified diff не содержит файлов."); return; }
+        java.util.Map<String, String> originals = new java.util.LinkedHashMap<>();
+        for (ChangeSet.FileChange file : skeleton.files()) {
+            Path path = root.resolve(file.path()).normalize();
+            ProjectAccessPolicy.Verdict verdict = policy.path(path, true);
+            if (!verdict.allowed()) { status.setText(verdict.message()); return; }
+            try { originals.put(file.path(), Files.exists(path) ? Files.readString(path) : ""); }
+            catch (Exception e) { status.setText("Не удалось прочитать " + file.path() + ": " + e.getMessage()); return; }
+        }
+        ChangeSet changeSet = ChangeSet.fromUnifiedDiff(diff, originals);
+        java.util.List<String> conflicts = changeSet.conflicts(originals);
+        String preview = changeSet.preview() + (conflicts.isEmpty() ? "\n\nКонфликтов не найдено."
+                : "\n\nКонфликты:\n- " + String.join("\n- ", conflicts));
+        JTextArea area = new JTextArea(preview, 26, 100);
+        area.setEditable(false);
+        area.setLineWrap(false);
+        JScrollPane scroll = new JScrollPane(area);
+        scroll.setPreferredSize(JBUI.size(900, 520));
+        int answer = JOptionPane.showConfirmDialog(this, scroll, "Diff review", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (answer != JOptionPane.OK_OPTION) return;
+        if (!conflicts.isEmpty()) { status.setText("Diff не применён: есть конфликты."); return; }
+        applyChangeSet(root, policy, changeSet);
+    }
+
+    private void applyChangeSet(Path root, ProjectAccessPolicy policy, ChangeSet changeSet) {
+        try {
+            CommandProcessor.getInstance().executeCommand(project, () -> ApplicationManager.getApplication().runWriteAction(() -> {
+                for (ChangeSet.FileChange file : changeSet.files()) {
+                    Path path = root.resolve(file.path()).normalize();
+                    ProjectAccessPolicy.Verdict verdict = policy.path(path, true);
+                    verdict.requireAllowed();
+                    String current;
+                    try { current = Files.exists(path) ? Files.readString(path) : ""; }
+                    catch (Exception e) { throw new IllegalStateException("Не удалось прочитать " + file.path(), e); }
+                    if (file.conflictsWith(current)) throw new IllegalStateException("Файл изменился после review: " + file.path());
+                    writeFile(path, file.afterText());
+                }
+            }), "Apply AI ChangeSet", null);
+            com.intellij.openapi.vfs.VirtualFileManager.getInstance().asyncRefresh(null);
+            status.setText("ChangeSet применён: файлов " + changeSet.files().size());
+        } catch (RuntimeException e) {
+            status.setText("ChangeSet не применён: " + e.getMessage());
+        }
+    }
+
+    private void writeFile(Path path, String text) {
+        try {
+            Files.createDirectories(path.getParent());
+            VirtualFile file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path);
+            if (file != null) {
+                var document = FileDocumentManager.getInstance().getDocument(file);
+                if (document != null) {
+                    document.setText(text);
+                    FileDocumentManager.getInstance().saveDocument(document);
+                    return;
+                }
+            }
+            Files.writeString(path, text);
+        } catch (Exception e) {
+            throw new IllegalStateException("Не удалось записать " + path.getFileName(), e);
+        }
+    }
+
+    private CollectedContext requestContext(Path root, ProjectAccessPolicy policy) {
+        if (!includeContext.isSelected()) return CollectedContext.empty("Контекст отключён для этого запроса.");
+        if (!pinnedContext.isEmpty()) return ProjectContextCollector.validated(root, policy, pinnedContext);
+        return ProjectContextCollector.currentEditor(project, root, policy);
+    }
+
+    private CollectedContext previewContext(Path root, ProjectAccessPolicy policy) {
+        if (!pinnedContext.isEmpty()) return ProjectContextCollector.validated(root, policy, pinnedContext);
+        CollectedContext active = ProjectContextCollector.currentEditor(project, root, policy);
+        if (active.items().isEmpty()) return active;
+        return new CollectedContext(active.items(), withNote(active.notes(), "Список контекста пуст; будет использован активный редактор."));
+    }
+
+    private java.util.List<String> withNote(java.util.List<String> notes, String note) {
+        java.util.ArrayList<String> result = new java.util.ArrayList<>(notes);
+        result.add(note);
+        return java.util.List.copyOf(result);
+    }
+
+    private void updateContextLabel() {
+        int count = pinnedContext.size();
+        includeContext.setText(count == 0 ? "Контекст" : "Контекст (" + count + ")");
+        includeContext.getAccessibleContext().setAccessibleName(includeContext.getText());
+        clearContextButton.setEnabled(count > 0 && active == null && !readingSession);
+    }
+
     private void cancel() {
         if (active != null) {
             ChatProvider.Request run = active;
@@ -818,6 +1065,11 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
 
     private void busy(boolean value) {
         access.setEnabled(!value && !readingSession);
+        includeContext.setEnabled(!value && !readingSession);
+        addContextButton.setEnabled(!value && !readingSession);
+        contextButton.setEnabled(!value && !readingSession);
+        clearContextButton.setEnabled(!value && !readingSession && !pinnedContext.isEmpty());
+        reviewButton.setEnabled(!value && !readingSession);
         progress.setVisible(value);
         send.setEnabled(!value && !readingSession);
         refresh.setEnabled(!value);

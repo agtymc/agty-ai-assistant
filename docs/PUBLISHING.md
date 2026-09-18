@@ -33,11 +33,11 @@
 
 ## Первый релиз
 
-Текущий локальный ZIP: `build/distributions/agty-ai-assistant-0.10.2.zip`.
+Текущий локальный ZIP: `build/distributions/agty-ai-assistant-0.11.0.zip`.
 
 Для GitHub Release:
 
-- tag: `v0.10.2`;
-- title: `AGTY AI Assistant 0.10.2`;
-- notes: взять раздел `0.10.2` из `CHANGELOG.md`;
+- tag: `v0.11.0`;
+- title: `AGTY AI Assistant 0.11.0`;
+- notes: взять раздел `0.11.0` из `CHANGELOG.md`;
 - artifact: ZIP, собранный тем же commit, который опубликован в tag.

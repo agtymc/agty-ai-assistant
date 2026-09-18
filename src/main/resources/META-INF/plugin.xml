@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>org.agty.aiassistant</id>
     <name>AGTY AI Assistant</name>
-    <version>0.10.2</version>
+    <version>0.11.0</version>
     <idea-version since-build="253" until-build="253.*"/>
     <vendor>AGTY</vendor>
     <description><![CDATA[

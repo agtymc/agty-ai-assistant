@@ -2,6 +2,7 @@ package org.agty.aiassistant.core;
 
 import com.google.gson.*;
 import org.agty.aiassistant.chat.*;
+import org.agty.aiassistant.security.ProjectAccessPolicy;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
@@ -35,6 +36,7 @@ public final class CodexChatProvider implements ChatProvider {
             }
             @Override public void run(Path directory, String prompt, Consumer<ChatEvent> events) throws Exception {
                 if (cancelled) throw new CancellationException();
+                new ProjectAccessPolicy(directory).request(writeAccess).requireAllowed();
                 try (var connection = new CodexSessionClient(serverCommand, directory, () -> cancelled)) {
                     client = connection;
                     if (cancelled) throw new CancellationException();
