@@ -93,6 +93,7 @@ public final class WorkspaceChanges implements AutoCloseable {
             } catch (UnsupportedOperationException ignored) { }
             long size = Files.size(file);
             if (size > MAX_BYTES - stored) return new Version(true, null, "", false);
+            FileMetadata.capture(file); // reject EFS/special metadata before any plaintext is read or persisted
             hash = hash(file);
             copy = Files.createTempFile(stash, "version-", ".bin");
             copyBounded(file, copy, MAX_BYTES - stored);
@@ -198,7 +199,7 @@ public final class WorkspaceChanges implements AutoCloseable {
             try { path = safe(name); } catch (IOException e) { continue; }
             boolean exists = Files.exists(path, LinkOption.NOFOLLOW_LINKS);
             if (exists == before.exists && (!exists || Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
-                    && Files.size(path) <= MAX_BYTES && hash(path).equals(before.sha256) && (!before.trustworthy || mode(path).equals(before.mode)))) continue;
+                    && !before.sha256.isEmpty() && Files.size(path) <= MAX_BYTES && hash(path).equals(before.sha256) && (!before.trustworthy || mode(path).equals(before.mode)))) continue;
             Version after = version(path);
             Operation operation = !before.exists ? Operation.CREATE : !after.exists ? Operation.DELETE : Operation.MODIFY;
             changes.add(new Change(name, name, operation, before, after, before, "", false));
@@ -244,7 +245,7 @@ public final class WorkspaceChanges implements AutoCloseable {
     private void verifyCurrent(String name, Version expected) throws IOException {
         Path path = safe(name);
         boolean exists = Files.exists(path, LinkOption.NOFOLLOW_LINKS);
-        if (exists != expected.exists || exists && (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || !hash(path).equals(expected.sha256) || !expected.mode.isEmpty() && !mode(path).equals(expected.mode)))
+        if (exists != expected.exists || exists && (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || !expected.mode.isEmpty() && !mode(path).equals(expected.mode) || !hash(path).equals(expected.sha256)))
             throw new IOException("После задачи изменён файл " + name + ". Откройте сравнение; автоматический откат запрещён.");
         if (edited.contains(name)) throw new IOException("Файл редактировался пользователем: " + name);
     }
@@ -298,6 +299,7 @@ public final class WorkspaceChanges implements AutoCloseable {
         return value;
     }
     private static void copyBounded(Path source, Path target, long limit) throws IOException {
+        var access = FileMetadata.capture(source);
         try (var input = Files.newInputStream(source, LinkOption.NOFOLLOW_LINKS);
              var output = Files.newOutputStream(target, StandardOpenOption.TRUNCATE_EXISTING)) {
             byte[] buffer = new byte[65536]; int count; long total = 0;
@@ -306,7 +308,7 @@ public final class WorkspaceChanges implements AutoCloseable {
                 output.write(buffer, 0, count);
             }
         }
-        FileMetadata.copyAccess(source, target);
+        FileMetadata.apply(access, target);
         Files.setLastModifiedTime(target, Files.getLastModifiedTime(source, LinkOption.NOFOLLOW_LINKS));
     }
     @Override public void close() throws IOException {

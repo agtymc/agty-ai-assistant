@@ -26,6 +26,7 @@ public final class FileMetadata {
     public static Access capture(Path path) throws IOException {
         try {
             if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) throw new IOException("Метаданные доступны только для обычного файла.");
+            if (Platform.isWindows()) rejectEncryptedFile(path);
             UserPrincipal owner = Files.getOwner(path, LinkOption.NOFOLLOW_LINKS);
             if (Files.getFileStore(path).supportsFileAttributeView("posix")) {
                 var attributes = Files.readAttributes(path, PosixFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
@@ -38,7 +39,7 @@ public final class FileMetadata {
             var acl = Files.getFileAttributeView(path, AclFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
             if (acl == null) throw new IOException("Файловая система не предоставляет проверяемые ACL.");
             var flags = Files.readAttributes(path, DosFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            return new Access(owner, null, null, List.copyOf(acl.getAcl()), null,
+            return new Access(owner, null, null, List.copyOf(acl.getAcl()), windowsDacl(path),
                     List.of(flags.isReadOnly(), flags.isHidden(), flags.isSystem()));
         } catch (LinkageError | RuntimeException e) { throw new IOException("Нельзя достоверно прочитать права файла; замена запрещена.", e); }
     }
@@ -55,7 +56,8 @@ public final class FileMetadata {
             } else {
                 var view = Files.getFileAttributeView(target, AclFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
                 if (view == null) throw new IOException("Целевая файловая система не поддерживает исходные ACL.");
-                view.setAcl(access.windowsAcl);
+                // NIO AclEntry omits INHERITED_ACE and the descriptor's DACL protection bit.
+                windowsDacl(target, access.nativeAcl);
                 Files.setAttribute(target, "dos:hidden", access.dos.get(1), LinkOption.NOFOLLOW_LINKS);
                 Files.setAttribute(target, "dos:system", access.dos.get(2), LinkOption.NOFOLLOW_LINKS);
                 Files.setAttribute(target, "dos:readonly", access.dos.get(0), LinkOption.NOFOLLOW_LINKS);
@@ -69,6 +71,63 @@ public final class FileMetadata {
     private static String unsupported() throws IOException { throw new IOException("Проверка ACL этой платформы не поддерживается."); }
     private static NativeLibrary libc() { return NativeLibrary.getInstance(Platform.C_LIBRARY_NAME); }
     private static IOException nativeError(String operation) { return new IOException(operation + ": errno " + Native.getLastError()); }
+    private static void rejectEncryptedFile(Path path) throws IOException {
+        int attributes = NativeLibrary.getInstance("kernel32").getFunction("GetFileAttributesW", Function.ALT_CONVENTION)
+                .invokeInt(new Object[]{new WString(path.toString())});
+        if (attributes == -1) throw nativeError("Чтение атрибутов Windows");
+        if ((attributes & 0x4000) != 0) throw new IOException("Файл зашифрован EFS; чтение в снимок и автоматическая замена запрещены.");
+    }
+    private static String windowsDacl(Path path) throws IOException {
+        var library = NativeLibrary.getInstance("advapi32");
+        var dacl = new PointerByReference(); var descriptor = new PointerByReference();
+        int result = library.getFunction("GetNamedSecurityInfoW", Function.ALT_CONVENTION).invokeInt(new Object[]{
+                new WString(path.toString()), 1, 4, Pointer.NULL, Pointer.NULL, dacl, Pointer.NULL, descriptor});
+        if (result != 0) throw new IOException("Чтение Windows DACL: error " + result);
+        Pointer security = descriptor.getValue();
+        try {
+            var control = new com.sun.jna.ptr.ShortByReference(); var revision = new com.sun.jna.ptr.IntByReference();
+            if (security == null || library.getFunction("GetSecurityDescriptorControl", Function.ALT_CONVENTION)
+                    .invokeInt(new Object[]{security, control, revision}) == 0) throw nativeError("Чтение DACL control");
+            // A missing/null DACL allows everybody; it must never be confused with an empty deny-all ACL.
+            Pointer acl = dacl.getValue();
+            if ((control.getValue() & 4) == 0 || acl == null) throw new IOException("Null/absent DACL не поддерживается для автоматической замены.");
+            if (library.getFunction("IsValidAcl", Function.ALT_CONVENTION).invokeInt(new Object[]{acl}) == 0) throw new IOException("Некорректная Windows DACL.");
+            int size = Short.toUnsignedInt(acl.getShort(2)), count = Short.toUnsignedInt(acl.getShort(4)), used = 8;
+            if (size < 8 || size > MAX_ACL) throw new IOException("Windows DACL превышает безопасный размер.");
+            for (int i = 0; i < count; i++) {
+                if (used + 4 > size) throw new IOException("Некорректная Windows ACE.");
+                int length = Short.toUnsignedInt(acl.getShort(used + 2L));
+                if (length < 4 || length > size - used) throw new IOException("Некорректный размер Windows ACE.");
+                used += length;
+            }
+            byte[] bytes = acl.getByteArray(0, used);
+            bytes[1] = 0; bytes[6] = 0; bytes[7] = 0; // reserved fields and trailing allocation padding are not access state
+            bytes[2] = (byte) used; bytes[3] = (byte) (used >>> 8);
+            var json = new com.google.gson.JsonObject();
+            json.addProperty("control", control.getValue() & 0x1500); // PROTECTED, AUTO_INHERITED, AUTO_INHERIT_REQ
+            json.addProperty("acl", Base64.getEncoder().encodeToString(bytes));
+            return json.toString();
+        } finally {
+            if (security != null) NativeLibrary.getInstance("kernel32").getFunction("LocalFree", Function.ALT_CONVENTION).invokePointer(new Object[]{security});
+        }
+    }
+    private static void windowsDacl(Path path, String encoded) throws IOException {
+        var json = com.google.gson.JsonParser.parseString(encoded).getAsJsonObject();
+        int control = json.get("control").getAsInt(); byte[] bytes = Base64.getDecoder().decode(json.get("acl").getAsString());
+        if ((control & ~0x1500) != 0 || bytes.length < 8 || bytes.length > MAX_ACL) throw new IOException("Некорректный снимок Windows DACL.");
+        var library = NativeLibrary.getInstance("advapi32");
+        try (var acl = new Memory(bytes.length)) {
+            acl.write(0, bytes, 0, bytes.length);
+            if (Short.toUnsignedInt(acl.getShort(2)) != bytes.length
+                    || library.getFunction("IsValidAcl", Function.ALT_CONVENTION).invokeInt(new Object[]{acl}) == 0)
+                throw new IOException("Некорректный снимок Windows ACL.");
+            int information = 4 | ((control & 0x1000) != 0 ? 0x80000000 : 0x20000000);
+            int result = library.getFunction("SetNamedSecurityInfoW", Function.ALT_CONVENTION).invokeInt(new Object[]{
+                    new WString(path.toString()), 1, information, Pointer.NULL, Pointer.NULL, acl, Pointer.NULL});
+            if (result != 0) throw new IOException("Сохранение Windows DACL: error " + result);
+        }
+        if (!windowsDacl(path).equals(encoded)) throw new IOException("Windows не сохранила DACL/inheritance в точности; замена запрещена.");
+    }
     private static String linuxAcl(Path path) throws IOException {
         return new com.google.gson.Gson().toJson(linuxAccessAttributes(path));
     }

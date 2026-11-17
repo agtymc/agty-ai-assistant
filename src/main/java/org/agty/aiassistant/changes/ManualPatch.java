@@ -81,6 +81,7 @@ public final class ManualPatch {
     }
     public static String readOriginal(Path path) throws IOException {
         if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return "";
+        FileMetadata.capture(path);
         byte[] bytes;
         try (var input = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) { bytes = input.readNBytes(MAX_BYTES + 1); }
         if (bytes.length > MAX_BYTES) throw new IOException("Файл превышает 16 MiB: " + path);
@@ -91,10 +92,11 @@ public final class ManualPatch {
         if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) throw new IOException("Ожидается обычный файл: " + path);
         try { if (((Number) Files.getAttribute(path, "unix:nlink", LinkOption.NOFOLLOW_LINKS)).longValue() > 1) throw new IOException("Ручной patch для hardlink запрещён: " + path); }
         catch (UnsupportedOperationException ignored) { }
+        var access = FileMetadata.capture(path);
         byte[] bytes;
         try (var input = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) { bytes = input.readNBytes(MAX_BYTES + 1); }
         if (bytes.length > MAX_BYTES) throw new IOException("Файл превышает 16 MiB: " + path);
-        return new State(true, bytes, FileMetadata.capture(path));
+        return new State(true, bytes, access);
     }
 
     private static Path safe(Path root, String name) throws IOException {

@@ -52,6 +52,7 @@ public final class SafeExport implements AutoCloseable {
     private static String fingerprint(Path path) throws IOException {
         if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) return "absent";
         if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) throw new IOException("Экспорт требует обычный файл, без символической ссылки: " + path);
+        var access = org.agty.aiassistant.changes.FileMetadata.capture(path);
         final long maximum = 64L * 1024 * 1024;
         if (Files.size(path) > maximum) throw new IOException("Существующий файл больше 64 MiB. Выберите новый файл для экспорта.");
         try {
@@ -63,7 +64,9 @@ public final class SafeExport implements AutoCloseable {
                     digest.update(buffer, 0, size);
                 }
             }
-            return HexFormat.of().formatHex(digest.digest()) + ":" + org.agty.aiassistant.changes.FileMetadata.fingerprint(path);
+            if (!access.fingerprint().equals(org.agty.aiassistant.changes.FileMetadata.fingerprint(path)))
+                throw new IOException("Права файла изменились во время проверки. Выберите файл заново.");
+            return HexFormat.of().formatHex(digest.digest()) + ":" + access.fingerprint();
         } catch (NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
     }
 
