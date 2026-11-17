@@ -47,9 +47,20 @@ jobs:
         shell: bash
         run: chmod +x ./gradlew
 
-      - name: Test and build plugin
+      - name: Test
+        timeout-minutes: 10
         shell: bash
-        run: ./gradlew test buildPlugin verifyPluginStructure verifyPlugin --stacktrace
+        run: ./gradlew test --stacktrace
+
+      - name: Build plugin and verify structure
+        timeout-minutes: 5
+        shell: bash
+        run: ./gradlew buildPlugin verifyPluginStructure --stacktrace
+
+      - name: Verify IDEA 253 compatibility
+        timeout-minutes: 5
+        shell: bash
+        run: ./gradlew verifyPlugin --stacktrace
 
       - name: Check generated command documentation
         shell: bash

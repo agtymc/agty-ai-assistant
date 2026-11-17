@@ -34,6 +34,19 @@ public final class SlashCommands {
         Command command = find(parts[0]);
         return new Invocation(command == null ? parts[0] : command.name(), parts.length > 1 ? parts[1].strip() : "");
     }
+    /** Validate the literal argument grammar from the same syntax used by completion and help.
+     * Account-specific IDs and paths are validated by their handlers/server, without executing examples. */
+    public static String argumentError(Command command, String argument) {
+        String grammar = command.syntax().substring(command.name().length()).strip();
+        if (grammar.isEmpty()) return argument.isBlank() ? "" : "Команда не принимает аргументы: " + command.syntax();
+        boolean optional = grammar.startsWith("[") && grammar.endsWith("]");
+        if (argument.isBlank()) return optional ? "" : "Укажите аргументы: " + command.syntax();
+        String values = optional ? grammar.substring(1, grammar.length() - 1) : grammar;
+        if (values.matches("[a-z-]+(?:\\|[a-z-]+)*")) {
+            if (!java.util.Arrays.asList(values.split("\\|")).contains(argument)) return "Синтаксис: " + command.syntax();
+        }
+        return "";
+    }
     public static List<Command> available(String provider) {
         return ALL.stream().filter(c -> c.implemented() && (!c.codexOnly() || provider.equals("codex"))).toList();
     }

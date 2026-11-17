@@ -972,6 +972,8 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
             var descriptor = SlashCommands.find(command.name());
             var availability = org.agty.aiassistant.chat.CommandAvailability.evaluate(descriptor, commandContext());
             if (!availability.available()) { status.setText(availability.reason()); return; }
+            String argumentError = SlashCommands.argumentError(descriptor, command.argument());
+            if (!argumentError.isEmpty()) { status.setText(argumentError + "; черновик сохранён."); return; }
             rememberPrompt(question); input.setText(""); hideCommands(); executeCommand(command); return;
         }
         if (readingSession) return;

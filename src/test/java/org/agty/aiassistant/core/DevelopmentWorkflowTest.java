@@ -32,6 +32,7 @@ class DevelopmentWorkflowTest {
                 var task = runner.start(session, new CodexChatProvider(command, pool).newRequest(options), directory, "edit", "edit", "Codex", true);
                 assertTrue(completed.await(8, TimeUnit.SECONDS)); assertEquals(TaskRunner.State.SUCCEEDED, task.state, task.status);
                 assertEquals(1, preflight.get()); assertTrue(task.pending.isEmpty());
+                assertTrue(session.messages.stream().anyMatch(message -> message.title.equals("Запрос обработан сервером") && message.complete));
                 assertEquals("agent result\n", Files.readString(file)); assertFalse(session.remoteId().isBlank());
                 assertEquals(1, task.workspace.changes().size()); assertTrue(task.workspace.changes().getFirst().proven());
                 assertTrue(session.messages.stream().anyMatch(message -> message.title.startsWith("Изменения файлов")));

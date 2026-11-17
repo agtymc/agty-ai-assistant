@@ -163,9 +163,11 @@ public final class TaskRunner implements AutoCloseable {
                 task.state = State.WAITING_USER;
                 task.pending.put(event.id(), com.google.gson.JsonParser.parseString(event.text()).getAsJsonObject());
                 task.status = "Требуется ответ (" + task.pending.size() + ")";
+                serverCard(task, event.id(), "Требуется ответ", "Запрос Codex: `" + event.title() + "`. Откройте «Ответить» для просмотра операции и допустимых решений.", false);
             }
             case SERVER_RESOLVED -> {
                 task.pending.remove(event.id());
+                serverCard(task, event.id(), "Запрос обработан сервером", "Сервер завершил ожидание ответа на этот запрос. Повторный ответ недоступен.", true);
                 task.state = task.pending.isEmpty() ? State.RUNNING : State.WAITING_USER;
                 task.status = task.pending.isEmpty() ? "Выполняется" : "Требуется ответ (" + task.pending.size() + ")";
             }
@@ -187,7 +189,16 @@ public final class TaskRunner implements AutoCloseable {
         }
         publish(task);
     }
+    private static void serverCard(Task task, String requestId, String title, String text, boolean complete) {
+        String id = task.id + ":server:" + requestId;
+        var message = task.session.messages.stream().filter(candidate -> candidate.id.equals(id)).findFirst().orElse(null);
+        if (message == null) { if (complete) return; message = new ChatSessions.Message(); message.id = id; task.session.messages.add(message); }
+        message.title = title; message.markdown = text; message.activity = true; message.complete = complete;
+    }
     private void finish(Task task, State state, String status) {
+        task.session.messages.stream().filter(message -> message.id.startsWith(task.id + ":server:") && !message.complete).forEach(message -> {
+            message.title = "Ожидание закрыто"; message.markdown = "Задача завершена; этот запрос больше не принимает ответы."; message.complete = true;
+        });
         task.pending.clear();
         task.state = state; task.status = status;
         task.session.messages.stream().filter(m -> m.id.startsWith(task.id + ":")).forEach(m -> m.complete = true);

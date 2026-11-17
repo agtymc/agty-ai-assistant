@@ -39,6 +39,9 @@ public final class ChatExecutionService implements Disposable {
             });
         }, org.agty.aiassistant.history.MessageArtifacts.getInstance()::text, event -> {
             if (event.kind() != org.agty.aiassistant.chat.ChatEvent.Kind.MESSAGE && event.kind() != org.agty.aiassistant.chat.ChatEvent.Kind.ACTIVITY) return event;
+            if (event.complete() && event.details() != null && event.details().has("type")
+                    && event.details().get("type").getAsString().equals("fileChange"))
+                ApplicationManager.getApplication().invokeLater(() -> { if (!project.isDisposed()) com.intellij.openapi.vfs.VirtualFileManager.getInstance().asyncRefresh(null); });
             var message = new org.agty.aiassistant.chat.ChatSessions.Message(); message.markdown = event.text(); message.complete = event.complete();
             if (event.details() != null && event.details().has("type") && event.details().get("type").getAsString().equals("imageGeneration")
                     && event.details().has("result") && event.details().get("result").isJsonPrimitive()
@@ -52,7 +55,8 @@ public final class ChatExecutionService implements Disposable {
         com.intellij.openapi.editor.EditorFactory.getInstance().getEventMulticaster().addDocumentListener(new com.intellij.openapi.editor.event.DocumentListener() {
             @Override public void documentChanged(com.intellij.openapi.editor.event.DocumentEvent event) {
                 var file = com.intellij.openapi.fileEditor.FileDocumentManager.getInstance().getFile(event.getDocument());
-                if (file != null && file.isInLocalFileSystem()) runner.markEdited(file.toNioPath());
+                if (file != null && file.isInLocalFileSystem() && !com.intellij.psi.ExternalChangeActionUtil.isExternalDocumentChangeInProgress())
+                    runner.markEdited(file.toNioPath());
             }
         }, this);
         var notified = new java.util.HashSet<String>();

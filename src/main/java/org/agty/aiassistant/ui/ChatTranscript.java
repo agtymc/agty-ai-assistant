@@ -131,7 +131,8 @@ public final class ChatTranscript extends JPanel implements Disposable {
                 .append(ChatStyles.css(appearance, browser != null)).append("</style></head><body>");
         for (var pair : entries.entrySet()) {
             Entry entry = pair.getValue();
-            if (entry.activity() && !appearance.showActivity) continue;
+            boolean serverRequest = pair.getKey().contains(":server:");
+            if (entry.activity() && !appearance.showActivity && !(serverRequest && !entry.complete())) continue;
             String style = entry.activity() ? "activity" : entry.title().equals("Вы") ? "user" : "assistant";
             html.append("<div data-entry-id=\"").append(MarkdownRenderer.escape(pair.getKey())).append("\" class=\"card ").append(style).append("\"><div class=\"title\">");
             if (entry.activity()) html.append("<a href=\"").append(markdown.action("toggle", pair.getKey())).append("\">")
@@ -141,6 +142,7 @@ public final class ChatTranscript extends JPanel implements Disposable {
             else html.append(" <a class=\"copy\" href=\"").append(markdown.action(entry.artifact().isEmpty() ? "copy" : "copy-artifact", entry.artifact().isEmpty() ? entry.markdown() : entry.artifact())).append("\">Копировать</a>");
             if (entry.activity() && entry.title().startsWith("Изменения"))
                 html.append(" <a href=\"").append(markdown.action("changes", pair.getKey().split(":", 2)[0])).append("\">Сравнение и откат</a>");
+            if (serverRequest && !entry.complete()) html.append(" <a href=\"").append(markdown.action("server-request", pair.getKey())).append("\">Ответить</a>");
             if (!entry.imageArtifact().isEmpty()) html.append(" <a href=\"").append(markdown.action("image-artifact", entry.imageArtifact())).append("\">Открыть изображение</a>");
             if (!entry.artifact().isEmpty()) html.append(" <a href=\"").append(markdown.action("artifact", entry.artifact())).append("\">Полный результат</a>");
             html.append("</div>");
@@ -168,6 +170,18 @@ public final class ChatTranscript extends JPanel implements Disposable {
                 var task = runner.taskByRequest(action.value());
                 if (task != null) new ChangesDialog(project, task.directory, runner, task).show();
                 else if (project.getBasePath() != null) new ChangesDialog(project, Path.of(project.getBasePath()), runner, null).show();
+            }
+            case "server-request" -> {
+                int separator = action.value().indexOf(":server:");
+                var runner = project.getService(org.agty.aiassistant.execution.ChatExecutionService.class).runner();
+                var task = runner.taskByRequest(action.value().substring(0, separator));
+                String id = action.value().substring(separator + ":server:".length());
+                if (task == null || !task.active() || !task.pending.containsKey(id)) { status.accept("Запрос больше не ожидает ответа."); return; }
+                var response = ServerRequestDialog.answer(project, task.pending.get(id));
+                if (response != null) {
+                    try { runner.respond(task.session.id, id, response); }
+                    catch (IllegalStateException e) { status.accept(e.getMessage()); }
+                }
             }
             case "image-artifact" -> ApplicationManager.getApplication().executeOnPooledThread(() -> {
                 try {

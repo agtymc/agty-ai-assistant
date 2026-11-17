@@ -35,7 +35,7 @@ public final class CodexConfigurable implements Configurable {
                 .addLabeledComponent("Путь к бинарнику Codex:", path)
                 .addComponent(new JLabel("Абсолютный путь без кавычек или codex для поиска в PATH IDE."))
                 .addComponent(check).addComponent(result)
-                .addComponent(new JLabel("Для входа выполните codex login в терминале под тем же пользователем."))
+                .addComponent(new JLabel("Для входа откройте чат и выполните /login; OAuth откроется в браузере."))
                 .addComponent(new JLabel("Плагин использует авторизацию и настройки установленного Codex CLI."))
                 .addComponentFillVertically(new JPanel(), 0).getPanel();
         reset();
