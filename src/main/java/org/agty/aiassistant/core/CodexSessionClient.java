@@ -13,38 +13,57 @@ import java.util.concurrent.atomic.AtomicInteger;
 /** Read-only app-server requests use the same executable/environment as chat. */
 public final class CodexSessionClient implements AutoCloseable {
     private final Process process;
+    private final OwnedProcessTermination termination;
     private final java.util.function.BooleanSupplier cancelled;
-    private final BlockingQueue<JsonObject> notifications = new LinkedBlockingQueue<>(2048);
+    private final ProtocolBuffer.Budget notificationBudget = new ProtocolBuffer.Budget(32_000_000);
+    private final ProtocolBuffer notifications = new ProtocolBuffer(2048, notificationBudget);
     private final BufferedWriter writer;
     private final ConcurrentMap<Integer, CompletableFuture<JsonObject>> responses = new ConcurrentHashMap<>();
     private volatile boolean closed;
-    private final ConcurrentMap<String, JsonObject> pendingServerRequests = new ConcurrentHashMap<>();
+    private record ServerRequest(JsonObject value, int characters, String handle) { }
+    private final ConcurrentMap<String, ServerRequest> pendingServerRequests = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, ServerRequest> pendingServerHandles = new ConcurrentHashMap<>();
+    // Small tombstones correlate resolved notifications arriving after a response was sent.
+    private final Map<String, String> answeredServerHandles = Collections.synchronizedMap(new LinkedHashMap<>());
     private static final Set<String> INTERACTIVE = Set.of("item/commandExecution/requestApproval", "item/fileChange/requestApproval",
             "item/permissions/requestApproval", "item/tool/requestUserInput", "mcpServer/elicitation/request");
-    public void respond(String id, JsonObject result) throws IOException {
-        var pending = pendingServerRequests.remove(id);
-        if (pending == null) throw new IOException("Запрос уже разрешён или соединение закрыто.");
-        JsonObject response = new JsonObject(); response.add("id", pending.get("id")); response.add("result", result);
+    static String serverRequestHandle(JsonObject notification) { return string(notification, "_agtyRequestHandle"); }
+    public void respond(String handle, JsonObject result) throws IOException {
+        if (!alive()) throw new IOException("Соединение запроса закрыто.");
+        var pending = pendingServerHandles.remove(handle);
+        if (pending == null) throw new IOException("Запрос уже разрешён или соединение изменилось.");
+        String wireId = pending.value().get("id").toString();
+        if (!pendingServerRequests.remove(wireId, pending)) throw new IOException("Исходный запрос уже разрешён.");
+        notificationBudget.release(pending.characters());
+        synchronized (answeredServerHandles) {
+            if (answeredServerHandles.size() >= 256) answeredServerHandles.remove(answeredServerHandles.keySet().iterator().next());
+            answeredServerHandles.put(wireId, handle);
+        }
+        JsonObject response = new JsonObject(); response.add("id", pending.value().get("id")); response.add("result", result);
         write(response);
     }
-    private final CopyOnWriteArrayList<BlockingQueue<JsonObject>> subscribers = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<ProtocolBuffer> subscribers = new CopyOnWriteArrayList<>();
     public final class Subscription implements AutoCloseable {
-        private final BlockingQueue<JsonObject> queue = new LinkedBlockingQueue<>(8192);
+        private final ProtocolBuffer queue = new ProtocolBuffer(8192, notificationBudget);
         private Subscription() { subscribers.add(queue); notifications.clear(); }
         JsonObject next() throws Exception {
-            JsonObject value = queue.poll(100, TimeUnit.MILLISECONDS);
+            JsonObject value = queue.poll(100);
             if (value == null && !alive()) throw new IOException("Codex app-server остановлен. " + failure);
             return value;
         }
-        @Override public void close() { subscribers.remove(queue); }
+        @Override public void close() { subscribers.remove(queue); queue.close(); }
     }
     Subscription subscribe() { return new Subscription(); }
     boolean alive() { return !closed && failure.isEmpty() && process.isAlive(); }
-    private void notification(JsonObject value) throws IOException {
+    private void notification(JsonObject value, int characters) throws IOException {
         if (subscribers.isEmpty()) {
-            if (!notifications.offer(value)) throw new IOException("Переполнена очередь событий Codex.");
+            // No task is subscribed: native history is authoritative on the next observation.
+            // Retain a bounded diagnostics tail without killing a healthy idle connection.
+            try {
+                if (!notifications.offer(value, characters)) { notifications.clear(); notifications.offer(value, characters); }
+            } catch (IOException full) { notifications.clear(); notifications.offer(value, characters); }
         } else for (var queue : subscribers)
-            if (!queue.offer(value)) throw new IOException("Переполнена очередь подписчика Codex.");
+            if (!queue.offer(value, characters)) throw new IOException("Переполнена очередь подписчика Codex.");
     }
     private final AtomicInteger sequence = new AtomicInteger();
     private volatile String failure = "";
@@ -52,21 +71,33 @@ public final class CodexSessionClient implements AutoCloseable {
         this(List.of(CodexCommand.executable(binary), "app-server"), directory, () -> false);
     }
     CodexSessionClient(List<String> command, Path directory, java.util.function.BooleanSupplier cancelled) throws Exception {
+        this(command, directory, cancelled, false);
+    }
+    CodexSessionClient(List<String> command, Path directory, java.util.function.BooleanSupplier cancelled, boolean experimental) throws Exception {
         this.cancelled = cancelled;
         process = new ProcessBuilder(command)
                 .directory(directory.toFile()).start();
+        termination = new OwnedProcessTermination(process);
         writer = process.outputWriter(StandardCharsets.UTF_8);
         Thread.startVirtualThread(() -> {
             try (var reader = process.inputReader(StandardCharsets.UTF_8)) {
                 String line;
-                while ((line = reader.readLine()) != null) {
-                    if (line.length() > 16_000_000) throw new IOException("История слишком велика.");
+                while ((line = readBoundedLine(reader, 16_000_000)) != null) {
                     var value = JsonParser.parseString(line).getAsJsonObject();
                     if (value.has("id")) {
                         if (value.has("method")) {
                             if (INTERACTIVE.contains(string(value, "method")) && !subscribers.isEmpty()) {
-                                pendingServerRequests.put(value.get("id").toString(), value);
-                                notification(value); continue;
+                                if (pendingServerRequests.size() >= 128) throw new IOException("Слишком много ожидающих запросов Codex.");
+                                notificationBudget.retain(line.length());
+                                String handle = UUID.randomUUID().toString();
+                                value.addProperty("_agtyRequestHandle", handle);
+                                var entry = new ServerRequest(value, line.length(), handle);
+                                if (pendingServerRequests.putIfAbsent(value.get("id").toString(), entry) != null) {
+                                    notificationBudget.release(entry.characters());
+                                    throw new IOException("Codex повторил ID ожидающего запроса.");
+                                }
+                                pendingServerHandles.put(handle, entry);
+                                notification(value, line.length()); continue;
                             }
                             JsonObject error = new JsonObject(); error.addProperty("code", -32601);
                             error.addProperty("message", "Interactive requests are not supported; permission was not granted.");
@@ -79,23 +110,34 @@ public final class CodexSessionClient implements AutoCloseable {
                     } else if (value.has("method")) {
                         if (string(value, "method").equals("serverRequest/resolved") && value.has("params")) {
                             var requestId = value.getAsJsonObject("params").get("requestId");
-                            if (requestId != null) pendingServerRequests.remove(requestId.toString());
+                            if (requestId != null) {
+                                var removed = pendingServerRequests.remove(requestId.toString());
+                                String handle;
+                                if (removed != null) {
+                                    pendingServerHandles.remove(removed.handle(), removed);
+                                    notificationBudget.release(removed.characters()); handle = removed.handle();
+                                } else handle = answeredServerHandles.remove(requestId.toString());
+                                if (handle != null) value.addProperty("_agtyRequestHandle", handle);
+                            }
                         }
-                        notification(value);
+                        notification(value, line.length());
                     }
                 }
             } catch (Exception e) { failure = String.valueOf(e.getMessage()); }
             finally {
                 if (failure.isEmpty()) failure = "Поток ответов закрыт.";
                 failPending(new IOException("Codex app-server остановлен. " + failure));
+                close();
             }
         });
         Thread.startVirtualThread(() -> {
-            try (var reader = process.errorReader(StandardCharsets.UTF_8)) { while (reader.readLine() != null) { } }
+            try (var reader = process.errorReader(StandardCharsets.UTF_8)) { char[] buffer = new char[8192]; while (reader.read(buffer) != -1) { } }
             catch (IOException ignored) { }
         });
         try {
-            call("initialize", JsonParser.parseString("{\"clientInfo\":{\"name\":\"agty_codex\",\"version\":\"0.6.0\"}}").getAsJsonObject());
+            JsonObject initialize = JsonParser.parseString("{\"clientInfo\":{\"name\":\"agty_codex\",\"version\":\"0.14.1\"}}").getAsJsonObject();
+            if (experimental) { var capabilities = new JsonObject(); capabilities.addProperty("experimentalApi", true); initialize.add("capabilities", capabilities); }
+            call("initialize", initialize);
             write(JsonParser.parseString("{\"method\":\"initialized\",\"params\":{}}").getAsJsonObject());
         } catch (Exception e) { close(); throw e; }
     }
@@ -126,6 +168,16 @@ public final class CodexSessionClient implements AutoCloseable {
             responses.remove(id, pending);
         }
     }
+    static String readBoundedLine(Reader reader, int maximum) throws IOException {
+        var line = new StringBuilder(Math.min(maximum, 8192));
+        int c;
+        while ((c = reader.read()) != -1) {
+            if (c == '\n') return line.toString();
+            if (line.length() >= maximum) throw new IOException("Событие Codex превышает допустимый размер.");
+            line.append((char) c);
+        }
+        return line.isEmpty() ? null : line.toString();
+    }
     private void failPending(IOException cause) {
         responses.forEach((id, pending) -> pending.completeExceptionally(cause));
         responses.clear();
@@ -142,7 +194,7 @@ public final class CodexSessionClient implements AutoCloseable {
     private synchronized void write(JsonObject value) throws IOException { writer.write(value + "\n"); writer.flush(); }
     JsonObject nextNotification() throws Exception {
         if (cancelled.getAsBoolean()) throw new CancellationException();
-        JsonObject next = notifications.poll(100, TimeUnit.MILLISECONDS);
+        JsonObject next = notifications.poll(100);
         if (next != null) return next;
         if (!failure.isEmpty() || !process.isAlive()) throw new IOException("Codex app-server остановлен. " + failure);
         return null;
@@ -196,8 +248,10 @@ public final class CodexSessionClient implements AutoCloseable {
             throw new IOException("Эта сессия принадлежит другому проекту.");
         return thread;
     }
-    static ChatSessions.Session summary(JsonObject thread) {
+    public static ChatSessions.Session summary(JsonObject thread) {
         var session = new ChatSessions.Session();
+        session.workingDirectory = string(thread, "cwd"); session.parentThreadId = string(thread, "parentThreadId");
+        session.selectedModel = string(thread, "model"); session.effectiveModel = session.selectedModel; session.reasoningEffort = string(thread, "reasoningEffort");
         session.codexId = string(thread, "id"); session.title = string(thread, "name");
         if (session.title.isBlank()) session.title = string(thread, "preview");
         session.title = session.title.replaceAll("\\s+", " ").strip();
@@ -221,6 +275,7 @@ public final class CodexSessionClient implements AutoCloseable {
                     if (event.kind() == org.agty.aiassistant.chat.ChatEvent.Kind.ACTIVITY && !event.text().isBlank()) {
                         var activity = new ChatSessions.Message(); activity.id = "codex:" + string(turn.getAsJsonObject(), "id") + ":" + event.id();
                         activity.activity = true; activity.title = event.title(); activity.markdown = event.text();
+                        if (type.equals("imageGeneration") && (!item.has("fileId") || item.get("fileId").isJsonNull())) activity.imageData = string(item, "result");
                         session.messages.add(activity);
                     }
                     continue;
@@ -243,13 +298,12 @@ public final class CodexSessionClient implements AutoCloseable {
     }
     @Override public void close() {
         closed = true;
-        pendingServerRequests.clear();
+        pendingServerRequests.forEach((id, value) -> {
+            if (pendingServerRequests.remove(id, value)) notificationBudget.release(value.characters());
+        });
+        pendingServerHandles.clear(); answeredServerHandles.clear();
+        notifications.close(); subscribers.forEach(ProtocolBuffer::close);
         failPending(new IOException("Соединение Codex закрыто."));
-        List<ProcessHandle> descendants = process.descendants().toList();
-        descendants.forEach(ProcessHandle::destroy);
-        process.destroy();
-        try { if (!process.waitFor(500, TimeUnit.MILLISECONDS)) process.destroyForcibly(); }
-        catch (InterruptedException e) { process.destroyForcibly(); Thread.currentThread().interrupt(); }
-        descendants.forEach(child -> { if (child.isAlive()) child.destroyForcibly(); });
+        termination.stop();
     }
 }

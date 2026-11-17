@@ -15,6 +15,13 @@ public final class CommandHelpService {
     private final HelpFile file = new HelpFile();
     private Consumer<String> insertion;
     private String selected = "";
+    private org.agty.aiassistant.chat.CommandAvailability.Context context = new org.agty.aiassistant.chat.CommandAvailability.Context("codex", true, false, false, false, null, "");
+    public void updateContext(org.agty.aiassistant.chat.CommandAvailability.Context context) { if (context.equals(this.context)) return;
+        this.context = context;
+        for (var editor : FileEditorManager.getInstance(project).getAllEditors(file))
+            if (editor instanceof CommandHelpEditor help) help.refreshAvailability();
+    }
+    org.agty.aiassistant.chat.CommandAvailability.Context context() { return context; }
     public CommandHelpService(Project project) { this.project = project; }
     public void open(String command, Consumer<String> insertion) {
         this.insertion = insertion; selected = command;

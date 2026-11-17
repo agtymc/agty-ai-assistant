@@ -23,6 +23,16 @@ class CodexStructuredEventsTest {
         var params = new JsonObject(); params.add("item", item); var notification = new JsonObject(); notification.addProperty("method", "item/completed"); notification.add("params", params);
         var result = stream.parse(notification); assertTrue(result.text().length() > 12000); assertTrue(result.text().contains("Example.java"));
     }
+    @Test void opaqueSearchResultsAndSafeLinksSurviveLiveAndHistoryRepresentation() {
+        var result = new CodexStream().parse(event("item/completed", """
+            {"item":{"id":"search","type":"webSearch","query":"example","results":[
+              {"title":"Result","url":"https://example.org/page","futureField":{"value":"preserved"}},
+              {"title":"Unsafe","url":"javascript:alert(1)"}]}}
+            """));
+        assertTrue(result.text().contains("[Result](<https://example.org/page>)"));
+        assertTrue(result.text().contains("futureField")); assertTrue(result.text().contains("preserved"));
+        assertFalse(result.text().contains("[Unsafe]"));
+    }
     @Test void unknownItemsAreVisibleAndRawReasoningIsIgnored() {
         var stream = new CodexStream();
         assertEquals(ChatEvent.Kind.ACTIVITY, stream.parse(event("item/completed", "{\"item\":{\"id\":\"future\",\"type\":\"futureItem\",\"result\":\"value\"}}" )).kind());

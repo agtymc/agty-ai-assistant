@@ -41,10 +41,52 @@ class CodexConnectionPoolTest {
             }); return null; });
             assertTrue(streamed.await(3, java.util.concurrent.TimeUnit.SECONDS)); first.cancel();
             a.get(); b.get();
+            var cancelledThread = firstEvents.stream().filter(e -> e.kind() == org.agty.aiassistant.chat.ChatEvent.Kind.SESSION).findFirst().orElseThrow().text();
+            assertTrue(java.nio.file.Files.exists(directory.resolve("interrupt-finished-" + cancelledThread)), "Cancellation must await completion, not merely ACK");
             assertSame(client, pool.acquire(command, directory)); assertTrue(client.alive());
             assertEquals(org.agty.aiassistant.chat.ChatEvent.Kind.DONE, secondEvents.getLast().kind());
             var firstId = firstEvents.stream().filter(e -> e.kind() == org.agty.aiassistant.chat.ChatEvent.Kind.SESSION).findFirst().orElseThrow().text();
             assertTrue(secondEvents.stream().filter(e -> e.kind() == org.agty.aiassistant.chat.ChatEvent.Kind.MESSAGE).noneMatch(e -> e.text().equals(firstId)));
+        }
+    }
+    @Test void rejectedInterruptOfFinishingTurnDoesNotKillOtherChatsConnection() throws Exception {
+        var command = new java.util.ArrayList<>(command()); command.set(command.size() - 1, "multiplex-reject");
+        try (var pool = new CodexConnectionPool(); var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var client = pool.acquire(command, directory); var request = new CodexChatProvider(command, pool).newRequest();
+            var streamed = new java.util.concurrent.CountDownLatch(1);
+            var future = executor.submit(() -> {
+                assertThrows(java.util.concurrent.CancellationException.class, () -> request.run(directory, "test", event -> {
+                    if (event.kind() == org.agty.aiassistant.chat.ChatEvent.Kind.MESSAGE) streamed.countDown();
+                }));
+            });
+            assertTrue(streamed.await(2, java.util.concurrent.TimeUnit.SECONDS)); request.cancel(); future.get();
+            assertTrue(client.alive()); assertSame(client, pool.acquire(command, directory));
+        }
+    }
+    @Test void lostTurnStartAckCannotLeaveUnobservedWriterRunning() throws Exception {
+        var command = new java.util.ArrayList<>(command()); command.set(command.size() - 1, "lost-start-ack");
+        try (var pool = new CodexConnectionPool()) {
+            var client = pool.acquire(command, directory);
+            assertThrows(java.io.IOException.class, () -> new CodexChatProvider(command, pool).newRequest().run(directory, "test", event -> {}));
+            long pid = Long.parseLong(java.nio.file.Files.readString(directory.resolve("writer-pid")));
+            assertFalse(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false));
+            assertFalse(client.alive());
+        }
+    }
+    @Test void cancellingCompactionWithoutAnnouncedTurnCannotHangForever() throws Exception {
+        var command = new java.util.ArrayList<>(command()); command.set(command.size() - 1, "compact-hang");
+        try (var pool = new CodexConnectionPool(); var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var client = pool.acquire(command, directory);
+            var options = new org.agty.aiassistant.chat.RequestOptions(directory, "", "", "",
+                    org.agty.aiassistant.chat.RequestOptions.Access.READ_ONLY, org.agty.aiassistant.chat.RequestOptions.Mode.WORK,
+                    List.of(), false, false, null, true);
+            var request = new CodexChatProvider(command, pool).newRequest(options);
+            var future = executor.submit(() -> assertThrows(java.util.concurrent.CancellationException.class,
+                    () -> request.run(directory, "", event -> {})));
+            assertTimeoutPreemptively(java.time.Duration.ofSeconds(2), () -> {
+                while (!java.nio.file.Files.exists(directory.resolve("compact-started"))) Thread.sleep(10);
+            });
+            request.cancel(); future.get(7, java.util.concurrent.TimeUnit.SECONDS); assertFalse(client.alive());
         }
     }
     @Test void subscribersIndependentlyReceiveNotifications() throws Exception {

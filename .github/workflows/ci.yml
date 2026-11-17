@@ -1,10 +1,15 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [master, main]
   pull_request:
     branches: [master, main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -16,6 +21,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,12 +31,55 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: gradle
+
+      # Extracted IDE/JBR transforms can change at runtime. Cache downloads only,
+      # so restored Gradle immutable workspaces are always rebuilt from their archives.
+      - name: Cache Gradle dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.gradle.kts', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: downloads-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Make Gradle executable
         shell: bash
         run: chmod +x ./gradlew
 
-      - name: Test and build plugin
+      - name: Test
+        timeout-minutes: 10
         shell: bash
-        run: ./gradlew test buildPlugin verifyPluginStructure --stacktrace
+        run: ./gradlew test --stacktrace
+
+      - name: Build plugin and verify structure
+        timeout-minutes: 5
+        shell: bash
+        run: ./gradlew buildPlugin verifyPluginStructure --stacktrace
+
+      - name: Verify IDEA 253 compatibility
+        timeout-minutes: 5
+        shell: bash
+        run: ./gradlew verifyPlugin --stacktrace
+
+      - name: Check generated command documentation
+        shell: bash
+        run: |
+          python3 scripts/generate_command_docs.py
+          git diff --exit-code -- docs/CODEX_COMMANDS.md
+
+      - name: Test native JCEF on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: xvfb-run -a ./gradlew test -PjcefSmoke=true --stacktrace
+
+      - name: Upload plugin and validation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-${{ matrix.os }}
+          path: |
+            build/distributions/*.zip
+            build/reports/
+            build/test-results/
+          retention-days: 14

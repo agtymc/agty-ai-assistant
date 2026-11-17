@@ -1,0 +1,36 @@
+{
+  "packages": [
+    [
+      "com.google.code.gson:gson",
+      "2.11.0"
+    ],
+    [
+      "org.commonmark:commonmark",
+      "0.24.0"
+    ],
+    [
+      "org.commonmark:commonmark-ext-gfm-tables",
+      "0.24.0"
+    ],
+    [
+      "org.commonmark:commonmark-ext-gfm-strikethrough",
+      "0.24.0"
+    ],
+    [
+      "com.google.errorprone:error_prone_annotations",
+      "2.27.0"
+    ]
+  ],
+  "response": {
+    "results": [
+      {},
+      {},
+      {},
+      {},
+      {}
+    ]
+  },
+  "date": "2026-11-17",
+  "source": "https://api.osv.dev/v1/querybatch",
+  "scope": "Five third-party Maven runtime jars packaged with the plugin; host IDEA/JBR and build-time dependencies excluded."
+}

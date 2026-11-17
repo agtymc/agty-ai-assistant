@@ -23,12 +23,15 @@ final class CommandHelpEditor extends UserDataHolderBase implements FileEditor {
     private final JPanel article = new JPanel();
     private final CommandHelpService service;
     private final VirtualFile file;
+    private boolean workflow;
     CommandHelpEditor(Project project, VirtualFile file) {
         this.file = file; service = project.getService(CommandHelpService.class);
         search.setToolTipText("Поиск по имени, aliases, описанию, категории и сценариям");
         JPanel navigation = new JPanel(new BorderLayout(4, 0));
         JButton catalog = new JButton("К каталогу"); catalog.addActionListener(e -> search.setText(""));
         navigation.add(catalog, BorderLayout.WEST); navigation.add(search, BorderLayout.CENTER);
+        JButton steps = new JButton("Рабочая последовательность");
+        steps.addActionListener(e -> renderWorkflow()); navigation.add(steps, BorderLayout.EAST);
         root.add(navigation, BorderLayout.NORTH);
         article.setLayout(new BoxLayout(article, BoxLayout.Y_AXIS));
         var split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, new JBScrollPane(list), new JBScrollPane(article));
@@ -42,7 +45,9 @@ final class CommandHelpEditor extends UserDataHolderBase implements FileEditor {
         filter(); select(service.selected());
     }
     void select(String command) {
-        var found = SlashCommands.find(command);
+        workflow = false;
+        String name = command.startsWith("#") ? command.substring(1) : command;
+        var found = SlashCommands.find(name);
         if (found == null) { search.setText(command); return; }
         search.setText(""); list.setSelectedValue(found.name(), true);
     }
@@ -58,20 +63,19 @@ final class CommandHelpEditor extends UserDataHolderBase implements FileEditor {
         area.setBackground(root.getBackground()); area.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8)); article.add(area);
     }
     private void render() {
+        workflow = false;
         article.removeAll();
         var command = SlashCommands.find(list.getSelectedValue() == null ? "" : list.getSelectedValue());
         if (command == null) return;
         paragraph(command.name() + " — " + command.description() + "\n" + command.category());
+        var availability = org.agty.aiassistant.chat.CommandAvailability.evaluate(command, service.context());
+        paragraph("Сейчас: " + availability.reason());
         paragraph(command.purpose() + "\n" + command.scenario());
         paragraph("Синтаксис: " + command.syntax() + "\nAliases: " + String.join(", ", command.aliases()) + "\nUI: " + command.ui());
         for (int index = 0; index < command.examples().size(); index++) {
             String example = command.examples().get(index);
             paragraph(command.exampleContexts().get(index)); paragraph(example);
-            JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT));
-            JButton copy = new JButton("Копировать"), insert = new JButton("Вставить в чат");
-            copy.addActionListener(e -> CopyPasteManager.getInstance().setContents(new StringSelection(example)));
-            insert.addActionListener(e -> service.insert(example));
-            actions.add(copy); actions.add(insert); article.add(actions);
+            exampleActions(example);
         }
         paragraph("Результат: " + command.result());
         paragraph("Требования и ограничения: " + command.constraints());
@@ -81,6 +85,24 @@ final class CommandHelpEditor extends UserDataHolderBase implements FileEditor {
             JButton link = new JButton(name); link.addActionListener(e -> select(name)); related.add(link);
         }
         article.add(related); article.revalidate(); article.repaint();
+    }
+    void refreshAvailability() { if (!workflow) render(); }
+    private void exampleActions(String example) {
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        JButton copy = new JButton("Копировать"), insert = new JButton("Вставить в чат");
+        copy.addActionListener(e -> CopyPasteManager.getInstance().setContents(new StringSelection(example)));
+        insert.addActionListener(e -> service.insert(example));
+        actions.add(copy); actions.add(insert); article.add(actions);
+    }
+    private void renderWorkflow() {
+        workflow = true; article.removeAll();
+        paragraph("От выбора модели до проверки результата");
+        paragraph("Каждый шаг вставляется отдельно в конец черновика и не выполняется автоматически. Подставьте свой путь и задачу. Plan управляет планированием; разрешения отдельно определяют доступ к файлам и сети.");
+        int number = 0;
+        for (var step : CommandWorkflow.STEPS) {
+            paragraph(++number + ". " + step.title()); paragraph(step.text()); exampleActions(step.text());
+        }
+        article.revalidate(); article.repaint();
     }
     @Override public @NotNull JComponent getComponent() { return root; }
     @Override public JComponent getPreferredFocusedComponent() { return search; }

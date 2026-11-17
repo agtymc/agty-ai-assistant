@@ -13,6 +13,29 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ChatRenderingTest {
+    @Test void delayedContextFromAnotherChatCannotOverwriteSameNamedFileContext() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            var store = com.intellij.openapi.application.ApplicationManager.getApplication().getService(org.agty.aiassistant.chat.ChatSessions.class);
+            var previous = store.getState().projects.remove(projectKey());
+            var panel = new AiAssistantChatPanel(project, () -> { throw new AssertionError("No model call"); });
+            try {
+                var sessions = store.project(projectKey()); var first = sessions.current(); var second = sessions.create();
+                panel.selectSessionById(second.id);
+                var own = new org.agty.aiassistant.context.ContextItem("Git diff", "same.txt", 0, 0, "second chat data");
+                panel.addCollectedContext(second, new org.agty.aiassistant.context.CollectedContext(java.util.List.of(own), java.util.List.of()));
+                var stale = new org.agty.aiassistant.context.ContextItem("Git diff", "same.txt", 0, 0, "private first chat data");
+                panel.addCollectedContext(first, new org.agty.aiassistant.context.CollectedContext(java.util.List.of(stale), java.util.List.of()));
+                assertEquals(1, second.contextSources.size());
+                assertEquals("second chat data", second.contextSources.getFirst().text);
+                var staged = new org.agty.aiassistant.context.ContextItem("Git diff staged", "same.txt", 0, 0, "staged second chat data");
+                panel.addCollectedContext(second, new org.agty.aiassistant.context.CollectedContext(java.util.List.of(staged), java.util.List.of()));
+                assertEquals(2, second.contextSources.size(), "Distinct staged/unstaged sources for the same path must coexist");
+            } finally {
+                panel.dispose(); store.getState().projects.remove(projectKey());
+                if (previous != null) store.getState().projects.put(projectKey(), previous);
+            }
+        });
+    }
     private static String projectKey() {
         return org.agty.aiassistant.chat.ProjectIdentity.getInstance(project).stableId(project);
     }
@@ -61,6 +84,50 @@ class ChatRenderingTest {
             java.nio.file.Files.deleteIfExists(directory);
         }
     }
+    @Test void externalVfsReloadDoesNotBecomeUserEditButTypingStillDisablesRollback() throws Exception {
+        var root = java.nio.file.Files.createTempDirectory("agty-editor-tracking"); var path = root.resolve("file.txt");
+        java.nio.file.Files.writeString(path, "disk old\n");
+        var runner = project.getService(org.agty.aiassistant.execution.ChatExecutionService.class).runner();
+        var session = new org.agty.aiassistant.chat.ChatSessions.Session();
+        var entered = new java.util.concurrent.CountDownLatch(1); var release = new java.util.concurrent.CountDownLatch(1);
+        var done = new java.util.concurrent.CountDownLatch(1);
+        var document = new AtomicReference<com.intellij.openapi.editor.Document>();
+        var taskRef = new AtomicReference<org.agty.aiassistant.execution.TaskRunner.Task>();
+        var subscription = runner.subscribe(task -> { if (task.session == session && !task.active()) done.countDown(); });
+        try {
+            com.intellij.testFramework.EdtTestUtil.runInEdtAndWait(() -> {
+                var file = com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path);
+                assertNotNull(file);
+                com.intellij.openapi.application.ReadAction.run(() -> document.set(com.intellij.openapi.fileEditor.FileDocumentManager.getInstance().getDocument(file)));
+                assertNotNull(document.get(), "Expected a text document: " + file.getFileType().getName());
+                com.intellij.openapi.command.WriteCommandAction.runWriteCommandAction(project, () -> document.get().setText("original\n"));
+                try { taskRef.set(runner.start(session, new org.agty.aiassistant.chat.ChatProvider.Request() {
+                    public void run(java.nio.file.Path directory, String prompt, java.util.function.Consumer<ChatEvent> events) throws Exception { entered.countDown(); release.await(); }
+                    public void cancel() { release.countDown(); }
+                }, root, "", "test", "Fixture", true)); } catch (Exception e) { throw new AssertionError(e); }
+            });
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS), taskRef.get().status);
+            assertEquals("original\n", java.nio.file.Files.readString(path), "Preflight must save the actual cwd document before capturing its base");
+            java.nio.file.Files.writeString(path, "agent\n");
+            com.intellij.testFramework.EdtTestUtil.runInEdtAndWait(() -> com.intellij.openapi.application.WriteAction.run(() -> {
+                var file = com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path);
+                assertNotNull(file); file.refresh(false, false);
+                com.intellij.openapi.fileEditor.FileDocumentManager.getInstance().reloadFromDisk(document.get());
+            }));
+            assertEquals("agent\n", document.get().getText());
+            var item = com.google.gson.JsonParser.parseString("""
+                {"changes":[{"path":"file.txt","kind":{"type":"update"},"diff":"@@ -1 +1 @@\\n-original\\n+agent\\n"}]}
+                """).getAsJsonObject();
+            var snapshot = taskRef.get().workspace; snapshot.report("change", item); snapshot.finish();
+            assertTrue(snapshot.changes().getFirst().proven(), "VFS reload must preserve proven native changes");
+            com.intellij.testFramework.EdtTestUtil.runInEdtAndWait(() -> com.intellij.openapi.command.WriteCommandAction.runWriteCommandAction(project, () -> document.get().insertString(0, "user ")));
+            snapshot.finish(); assertFalse(snapshot.changes().getFirst().proven());
+        } finally {
+            release.countDown(); done.await(5, java.util.concurrent.TimeUnit.SECONDS); subscription.close();
+            if (document.get() != null) com.intellij.testFramework.EdtTestUtil.runInEdtAndWait(() -> com.intellij.openapi.application.WriteAction.run(() -> com.intellij.openapi.fileEditor.FileDocumentManager.getInstance().reloadFromDisk(document.get())));
+            java.nio.file.Files.deleteIfExists(path); java.nio.file.Files.deleteIfExists(root);
+        }
+    }
     @Test void composerFits320PixelsAndPreservesUnknownCommandDraft() throws Exception {
         SwingUtilities.invokeAndWait(() -> {
             var panel = new AiAssistantChatPanel(project, () -> { throw new AssertionError("No model call"); });
@@ -81,6 +148,49 @@ class ChatRenderingTest {
                 } catch (java.io.IOException e) { throw new AssertionError(e); }
             } finally { panel.dispose(); }
         });
+    }
+    @Test void compactControlsStayInsideLogicalWidthsAtAllSupportedScales() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            float previous = com.intellij.ui.scale.JBUIScale.scale(1f);
+            var previousLaf = UIManager.getLookAndFeel();
+            try {
+                for (String theme : new String[]{"light", "dark"}) {
+                    try { UIManager.setLookAndFeel(theme.equals("dark") ? new com.intellij.ide.ui.laf.darcula.DarculaLaf() : new javax.swing.plaf.metal.MetalLookAndFeel()); }
+                    catch (UnsupportedLookAndFeelException e) { throw new AssertionError(e); }
+                    for (float scale : new float[]{1f, 1.5f, 2f}) {
+                        com.intellij.ui.scale.JBUIScale.setUserScaleFactor(scale);
+                        for (int width : new int[]{320, 360, 480}) {
+                            var panel = new AiAssistantChatPanel(project, () -> { throw new AssertionError("No request expected"); });
+                            try {
+                                ((JButton) named(panel, "session-menu")).setText("Очень длинное название задачи с путём src/main/java/example/LongName.java");
+                                scaleFonts(panel, scale);
+                                int pixels = Math.round(width * scale), height = Math.round(720 * scale);
+                                panel.setSize(pixels, height); layoutTree(panel);
+                                for (String name : java.util.List.of("session-menu", "request-options", "add-context", "context-preview")) {
+                                    var control = named(panel, name); assertNotNull(control, name);
+                                    var bounds = SwingUtilities.convertRectangle(control.getParent(), control.getBounds(), panel);
+                                    assertTrue(bounds.x >= 0 && bounds.x + bounds.width <= pixels, name + " at " + width + "/" + scale);
+                                    assertTrue(bounds.width > 0 && bounds.height > 0, name);
+                                }
+                                var image = new java.awt.image.BufferedImage(pixels, height, java.awt.image.BufferedImage.TYPE_INT_RGB);
+                                var graphics = image.createGraphics(); panel.paint(graphics); graphics.dispose();
+                                try {
+                                    var path = java.nio.file.Path.of("build/reports/screenshots/" + theme + "-" + width + "-" + Math.round(scale * 100) + ".png");
+                                    java.nio.file.Files.createDirectories(path.getParent()); javax.imageio.ImageIO.write(image, "png", path.toFile());
+                                } catch (java.io.IOException e) { throw new AssertionError(e); }
+                            } finally { panel.dispose(); }
+                        }
+                    }
+                }
+            } finally {
+                com.intellij.ui.scale.JBUIScale.setUserScaleFactor(previous);
+                try { UIManager.setLookAndFeel(previousLaf); } catch (UnsupportedLookAndFeelException e) { throw new AssertionError(e); }
+            }
+        });
+    }
+    private static void scaleFonts(Component component, float scale) {
+        if (component.getFont() != null) component.setFont(component.getFont().deriveFont(component.getFont().getSize2D() * scale));
+        if (component instanceof Container container) for (Component child : container.getComponents()) scaleFonts(child, scale);
     }
     @Test void statusButtonRunsCommandAndStatusIsBelowChat() throws Exception {
         AtomicReference<Throwable> failure = new AtomicReference<>();

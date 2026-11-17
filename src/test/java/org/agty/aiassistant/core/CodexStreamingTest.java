@@ -15,6 +15,54 @@ class CodexStreamingTest {
         return new CodexChatProvider(List.of(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                 "-cp", System.getProperty("fixture.classes"), RpcFixture.class.getName(), mode));
     }
+    @Test void imageAttachmentsRespectScopeBeforeStartingAppServer() throws Exception {
+        Path image = directory.resolve("sample.png"); java.nio.file.Files.write(image, new byte[]{(byte) 137, 80, 78, 71, 0});
+        var policy = new org.agty.aiassistant.security.ProjectAccessPolicy(directory);
+        assertFalse(policy.path(image, false).allowed()); assertTrue(policy.image(image).allowed());
+        var outside = java.nio.file.Files.createTempFile("agty-outside-image", ".png");
+        try {
+            var options = new org.agty.aiassistant.chat.RequestOptions(directory, "", "", "",
+                    org.agty.aiassistant.chat.RequestOptions.Access.READ_ONLY, org.agty.aiassistant.chat.RequestOptions.Mode.WORK,
+                    List.of(new org.agty.aiassistant.chat.RequestOptions.Attachment("localImage", outside.toString())), false);
+            assertThrows(IllegalStateException.class, () -> provider("read").newRequest(options).run(directory, "", event -> {}));
+        } finally { java.nio.file.Files.deleteIfExists(outside); }
+    }
+    @Test void imagePolicyIsRecheckedAfterHandshakeBeforeSendingAttachment() throws Exception {
+        Path image = directory.resolve("sample.png"); java.nio.file.Files.write(image, new byte[]{(byte) 137, 80, 78, 71, 0});
+        var options = new org.agty.aiassistant.chat.RequestOptions(directory, "", "engine-b", "",
+                org.agty.aiassistant.chat.RequestOptions.Access.READ_ONLY, org.agty.aiassistant.chat.RequestOptions.Mode.WORK,
+                List.of(new org.agty.aiassistant.chat.RequestOptions.Attachment("localImage", image.toString())), false);
+        var error = assertThrows(IllegalStateException.class, () -> provider("image-swap").newRequest(options).run(directory, "", event -> {}));
+        assertTrue(error.getMessage().contains(".aiignore"));
+    }
+    @Test void nativeReviewAndCompactionNeverBecomeOrdinaryTurnStart() throws Exception {
+        var target = new com.google.gson.JsonObject(); target.addProperty("type", "uncommittedChanges");
+        for (String mode : List.of("review", "compact")) {
+            var options = new org.agty.aiassistant.chat.RequestOptions(directory, "", "", "",
+                    org.agty.aiassistant.chat.RequestOptions.Access.READ_ONLY, org.agty.aiassistant.chat.RequestOptions.Mode.WORK,
+                    List.of(), false, false, mode.equals("review") ? target : null, mode.equals("compact"));
+            var events = new ArrayList<ChatEvent>(); provider(mode).newRequest(options).run(directory, "", events::add);
+            assertEquals(ChatEvent.Kind.DONE, events.getLast().kind());
+        }
+    }
+    @Test void reviewCannotInheritWiderNativePermissionsThanItsReadOnlyUi() {
+        var target = new com.google.gson.JsonObject(); target.addProperty("type", "uncommittedChanges");
+        var options = new org.agty.aiassistant.chat.RequestOptions(directory, "", "", "",
+                org.agty.aiassistant.chat.RequestOptions.Access.READ_ONLY, org.agty.aiassistant.chat.RequestOptions.Mode.WORK,
+                List.of(), false, false, target);
+        for (String mode : List.of("review-wide", "review-network")) {
+            var events = new ArrayList<ChatEvent>();
+            var error = assertThrows(java.io.IOException.class, () -> provider(mode).newRequest(options).run(directory, "", events::add));
+            assertTrue(error.getMessage().contains("не подтвердил режим")); assertTrue(events.isEmpty());
+        }
+        assertThrows(java.io.IOException.class, () -> CodexChatProvider.verifyReadOnlyScope(new com.google.gson.JsonObject(), directory));
+    }
+    @Test void observingExistingNativeSessionDoesNotStartOrReconfigureATurn() throws Exception {
+        var events = new ArrayList<ChatEvent>();
+        provider("observe").observeRequest("019e309f-5fe7-7a93-90d0-ce794686cdfd").run(directory, "", events::add);
+        assertTrue(events.stream().anyMatch(e -> e.text().equals("Observed without turn/start")));
+        assertEquals(ChatEvent.Kind.DONE, events.getLast().kind());
+    }
     @Test void interactiveApprovalIsAnsweredExactlyOnceWithoutRestartingTurn() throws Exception {
         var request = provider("interactive").newRequest(new org.agty.aiassistant.chat.RequestOptions(directory, "", "", "",
                 org.agty.aiassistant.chat.RequestOptions.Access.READ_ONLY,
@@ -31,6 +79,26 @@ class CodexStreamingTest {
             }
         });
         assertTrue(events.stream().anyMatch(e -> e.kind() == ChatEvent.Kind.SERVER_RESOLVED));
+        assertEquals(ChatEvent.Kind.DONE, events.getLast().kind());
+    }
+    @Test void reconnectResolvesOldApprovalCardsAndRejectsTheirDelayedAnswers() throws Exception {
+        var request = provider("reconnect-approval").newRequest();
+        var events = new ArrayList<ChatEvent>(); var firstHandle = new java.util.concurrent.atomic.AtomicReference<String>();
+        request.run(directory, "test", event -> {
+            events.add(event);
+            if (event.kind() != ChatEvent.Kind.SERVER_REQUEST) return;
+            try {
+                if (firstHandle.get() == null) { firstHandle.set(event.id()); request.steer("disconnect fixture"); }
+                else {
+                    assertNotEquals(firstHandle.get(), event.id());
+                    assertTrue(events.stream().anyMatch(previous -> previous.kind() == ChatEvent.Kind.SERVER_RESOLVED && previous.id().equals(firstHandle.get())));
+                    var response = new com.google.gson.JsonObject(); response.addProperty("decision", "accept");
+                    assertThrows(java.io.IOException.class, () -> request.respond(firstHandle.get(), response));
+                    request.respond(event.id(), response);
+                }
+            } catch (Exception e) { throw new AssertionError(e); }
+        });
+        assertEquals(2, events.stream().filter(event -> event.kind() == ChatEvent.Kind.SERVER_REQUEST).count());
         assertEquals(ChatEvent.Kind.DONE, events.getLast().kind());
     }
     @Test void deliversChunksBeforeFinalAndDoesNotDuplicateCompletedText() throws Exception {

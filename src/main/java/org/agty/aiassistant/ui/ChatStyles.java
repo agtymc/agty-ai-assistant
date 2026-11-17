@@ -26,6 +26,10 @@ final class ChatStyles {
                 + ".codehead a{float:right;} .codeblock{padding:12px;background:" + codeBg + ";font-size:" + d.codeSize + "px;}"
                 + "td,th{padding:6px;border:1px solid #777777;}blockquote{margin-left:0;padding-left:12px;border-left:2px solid " + accent + ";}"
                 + ".copy{font-size:11px;font-weight:normal;} .welcome{text-align:center;padding:40px 10px;}";
+        css += ".diff{border-collapse:collapse;width:100%;}.diff td{border:0;padding:1px 4px;vertical-align:top;}"
+                + ".diff .gutter{width:32px;text-align:right;color:" + (dark ? "#aaaaaa" : "#666666") + ";}"
+                + ".diff .addition{background:" + (dark ? "#24412c" : "#e2f4e5") + ";}.diff .deletion{background:"
+                + (dark ? "#4b2929" : "#fbe3e3") + ";}";
         if (browser) css += "*{box-sizing:border-box;}body{line-height:1.55;overflow-wrap:anywhere;}#chat{max-width:1100px;margin:auto;}"
                 + ".card{width:100%;} .user{width:fit-content;max-width:85%;margin-left:auto;border-radius:12px;padding:10px 14px;}"
                 + ".activity{border-radius:6px;opacity:.85;} .title{display:flex;gap:12px;align-items:center;font-size:" + d.activitySize + "px;} .title .copy{margin-left:auto;opacity:.65;}"
