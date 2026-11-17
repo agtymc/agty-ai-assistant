@@ -487,10 +487,23 @@ final class SessionCommandActions {
     }
     private void plugins(String argument) {
         String[] parts = argument.split("\\s+", 2); var params = new JsonObject();
-        if (parts.length == 2 && Set.of("install", "uninstall").contains(parts[0])) {
-            if (!confirm("Изменить общую установку плагинов Codex: " + argument + "?")) return;
-            params.addProperty(parts[0].equals("install") ? "pluginName" : "pluginId", parts[1]);
-            rpc(parts[0].equals("install") ? "plugin/install" : "plugin/uninstall", params, result -> host.status.accept("Плагин Codex: операция завершена"));
+        if (parts.length == 2 && parts[0].equals("install")) {
+            var dirs = new JsonArray(); dirs.add(directory().toString()); params.add("cwds", dirs);
+            rpc("plugin/list", params, catalog -> {
+                if (!host.live.getAsBoolean() || responseTarget != current()) { message("Плагины Codex", "Каталог загружен. Вернитесь в исходный чат и повторите установку для выбора источника."); return; }
+                var candidates = PluginInstallSelection.matching(catalog, parts[1]);
+                if (candidates.isEmpty()) throw new IllegalStateException("Плагин не найден в предоставленных Codex каталогах. Откройте /plugins и используйте имя или ID из списка.");
+                var selected = candidates.size() == 1 ? candidates.getFirst() : (PluginInstallSelection) JOptionPane.showInputDialog(null,
+                        "Выберите источник установки", "Каталог плагинов Codex", JOptionPane.QUESTION_MESSAGE, null, candidates.toArray(), candidates.getFirst());
+                if (selected == null) return;
+                var install = selected.params();
+                if (!confirm("Установить " + selected + "?\nИсточник: " + (selected.localPath().isBlank() ? selected.marketplace() : selected.localPath())
+                        + "\n" + inventory(selected.details()) + "\nЭто изменит общую установку Codex и может подключить инструменты/skills/MCP плагина.")) return;
+                rpc("plugin/install", install, result -> message("Установка плагина", inventory(result) + "\nПри необходимости авторизации MCP используйте /mcp login <ИМЯ_СЕРВЕРА>."));
+            });
+        } else if (parts.length == 2 && parts[0].equals("uninstall")) {
+            if (!confirm("Удалить плагин Codex " + parts[1] + " из общей установки?")) return;
+            params.addProperty("pluginId", parts[1]); rpc("plugin/uninstall", params, result -> message("Удаление плагина", inventory(result)));
         } else { var dirs = new JsonArray(); dirs.add(directory().toString()); params.add("cwds", dirs); rpc("plugin/list", params, result -> message("Плагины Codex", inventory(result))); }
     }
     /** Human-readable recursive inventory; credentials and opaque configuration are omitted. */

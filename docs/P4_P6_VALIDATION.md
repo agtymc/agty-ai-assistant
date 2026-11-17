@@ -13,7 +13,7 @@ python3 scripts/generate_command_docs.py
 git diff --check
 ```
 
-- 122 теста, 0 падений, ошибок и пропусков в полном прогоне с обоими smoke-флагами.
+- 124 теста, 0 падений, ошибок и пропусков в полном прогоне с обоими smoke-флагами.
 - `buildPlugin`, `verifyPluginStructure`, `verifyPlugin`: BUILD SUCCESSFUL. Plugin Verifier: **Compatible** с IU-253.28294.334; отмечены обращения к экспериментальному API платформы `WriteIntentReadAction`. Целевой диапазон остаётся 253.*.
 - Verifier выдал HTTP 451 при попытке загрузить сторонние необязательные плагины IDE (CLion Radler/Go Template); итоговый вердикт плагина — Compatible. Эти предупреждения не скрыты настройками failureLevel.
 - Установочный ZIP: `build/distributions/agty-ai-assistant-0.14.0.zip`.
@@ -28,6 +28,7 @@ git diff --check
 - Сериализация записи по real cwd, параллельность независимых каталогов, отмена queued задачи, остановка принадлежащих проекту процессов. Очередь читает актуальный native thread ID и сохраняет новый несвязанный черновик.
 - Несколько ожидающих подтверждений, ответ ровно один раз, resolution другим клиентом, отказ после resolution. Серверный availableDecisions ограничивает UI; постоянные правила передаются без расширения исходного предложения.
 - Вопросы, секретные поля, primitive MCP forms, enums, multiple-choice arrays, числовые/строковые ограничения и форматы; неизвестная схема не принимается. URL-elicitation требует отдельного явного ответа после браузера.
+- Установка плагинов выбирает конкретный local/remote marketplace из каталога, передаёт ровно один selector и не формирует запрос для недоступного плагина (PluginInstallSelectionTest). Это проверяет дополнительное требование [реализации plugin/install 0.169.0](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/app-server/src/request_processors/plugins.rs).
 - Native review и compaction не превращаются в обычный `turn/start`; observe не переопределяет cwd/политику и не создаёт новый turn. Guardian retry адаптирует только поля исходного отказа.
 - Постраничные элементы истории с повторяющимися item ID разных turn, финальные снимки без дублирования, неизвестные элементы, публичные summaries без raw reasoning. Большие результаты и изображения проверяются по SHA-256, traversal и повреждение блокируются.
 - Полный fake App Server сценарий: исходная незакоммиченная пользовательская строка → явное подтверждение → нативное изменение файла → карточка изменений → зафиксированная итоговая версия → проверяемый откат к пользовательской строке.
@@ -39,7 +40,7 @@ git diff --check
 
 ## Платформы и границы проверки
 
-CI выполняет `test buildPlugin verifyPluginStructure verifyPlugin`, проверяет воспроизводимость Markdown и сохраняет ZIP/отчёты для Linux, Windows и macOS. На Linux дополнительно выполняется полный набор с нативным JCEF под Xvfb. Результаты удалённой матрицы и проверенный commit доступны в [Checks draft PR #1](https://github.com/agtymc/agty-ai-assistant/pull/1/checks). Прогон [44075010630](https://github.com/agtymc/agty-ai-assistant/actions/runs/44075010630) завершился успешно на трёх ОС; после финальных правок выполняется контрольный прогон того же набора. Реальный CLI smoke включён локально; CI без авторизации пропускает его явно.
+CI выполняет `test buildPlugin verifyPluginStructure verifyPlugin`, проверяет воспроизводимость Markdown и сохраняет ZIP/отчёты для Linux, Windows и macOS. На Linux дополнительно выполняется полный набор с нативным JCEF под Xvfb. Результаты удалённой матрицы и проверенный commit доступны в [Checks draft PR #1](https://github.com/agtymc/agty-ai-assistant/pull/1/checks). Прогон [44075010630](https://github.com/agtymc/agty-ai-assistant/actions/runs/44075010630) завершился успешно на трёх ОС; каждый финальный снимок проверяется тем же набором, актуальный результат отображается в Checks. Реальный CLI smoke включён локально; CI без авторизации пропускает его явно.
 
 Первый прогон выявил и позволил исправить alias-пути (`/var`/`/private/var`, Windows 8.3), UTF-8 вывода Java fixtures и зависимость тестового worktree от `core.autocrlf`. Повторный Linux-прогон выявил непригодность кэширования распакованного IDE/JBR в immutable Gradle transforms: CI теперь кэширует только скачанные modules-2/wrapper, пересоздавая распакованные SDK из архивов.
 

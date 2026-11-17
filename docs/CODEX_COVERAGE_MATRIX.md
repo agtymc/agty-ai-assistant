@@ -13,7 +13,7 @@
 | Изменения | fileChange, turn diff, Git porcelain | построчный diff, native Diff Viewer, task/Git lists | diff/review | WorkspaceChangesTest, WorkingTreeChangesTest, DiffMarkupTest |
 | Сохранность и откат | снимок байтов/хешей, Local History | файл/hunk/задача, запрет при недостоверной базе | diff | WorkspaceChangesTest, DevelopmentWorkflowTest, ChangeSetTest |
 | План, review, goal | collaborationMode, review/start, compact/start, thread/goal/* | команды, настройки, карточки | plan/review/compact/recap/goal | CodexStreamingTest, CommandCatalogTest |
-| Интеграции | skills, mcpServer, app, plugin, hooks, config | список, явные изменения конфигурации/OAuth | skills/mcp/apps/plugins/hooks/import | McpFormTest, CommandCatalogTest; реальные внешние серверы зависят от аккаунта |
+| Интеграции | skills, mcpServer, app, plugin, hooks, config | список, явные изменения конфигурации/OAuth | skills/mcp/apps/plugins/hooks/import | McpFormTest, PluginInstallSelectionTest, CommandCatalogTest; реальные внешние серверы зависят от аккаунта |
 | Worktree и агенты | Git worktree, thread/list, native observation | привязанные чаты и наблюдение | worktree/agents | WorktreeManagerTest, CodexStreamingTest, TaskRunnerTest |
 | Авторизация и модель | account/*, model/list, точная версия | OAuth, каталог и доступность | login/logout/model/speed/daybreak | CodexModelsTest, CodexCompatibilityTest, RealCodexSmokeTest |
 | Справочник | ресурсный общий каталог и workflow | офлайн editor tab, поиск, примеры | CODEX_COMMANDS.md | CommandCatalogTest, CommandAvailabilityTest, CommandHelpTest |
