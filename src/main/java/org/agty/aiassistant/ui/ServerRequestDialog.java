@@ -21,13 +21,17 @@ final class ServerRequestDialog {
             JsonObject result = new JsonObject(); result.addProperty("scope", "turn");
             result.add("permissions", choice == 0 ? params.get("permissions").deepCopy() : new JsonObject()); return result;
         }
-        int choice = Messages.showDialog(project, "Операция: " + method + "\n" + params,
-                "Подтверждение Codex", new String[]{"Разрешить один раз", "Разрешить для сессии", "Отказать", "Отменить turn", "Ответить позже"},
-                4, Messages.getQuestionIcon());
-        if (choice < 0 || choice >= 4) return null;
-        JsonObject result = new JsonObject(); result.addProperty("decision", List.of("accept", "acceptForSession", "decline", "cancel").get(choice));
-        return result;
+        var decisions = ApprovalDecisions.choices(params, method.equals("item/commandExecution/requestApproval"));
+        String[] labels = new String[decisions.size() + 1];
+        for (int i = 0; i < decisions.size(); i++) labels[i] = decisions.get(i).label();
+        labels[decisions.size()] = "Ответить позже";
+        JTextArea detail = new JTextArea("Операция: " + method + "\n" + new GsonBuilder().setPrettyPrinting().create().toJson(params));
+        detail.setEditable(false); detail.setLineWrap(true); detail.setWrapStyleWord(true); detail.setRows(12); detail.setColumns(65);
+        int choice = JOptionPane.showOptionDialog(null, new JScrollPane(detail), "Подтверждение Codex",
+                JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE, null, labels, labels[labels.length - 1]);
+        return choice < 0 || choice >= decisions.size() ? null : decisions.get(choice).response();
     }
+
     private static JsonObject questions(JsonObject params) {
         JPanel form = new JPanel(); form.setLayout(new BoxLayout(form, BoxLayout.Y_AXIS));
         Map<String, JComponent> fields = new LinkedHashMap<>();
@@ -58,60 +62,34 @@ final class ServerRequestDialog {
     }
     private static JsonObject elicitation(Project project, JsonObject params) {
         String mode = text(params, "mode");
-        // Accept only forms whose fields can be validated locally; other forms remain visible and can be declined.
-        boolean supported = mode.equals("form") && params.has("requestedSchema") && supportedSchema(params.getAsJsonObject("requestedSchema"));
+        if (mode.equals("url")) {
+            int selected = Messages.showDialog(project, "MCP: " + text(params, "serverName") + "\n" + text(params, "message") + "\n" + text(params, "url"),
+                    "Авторизация MCP", new String[]{"Открыть браузер", "Подтвердить завершение", "Отказать", "Отменить", "Позже"}, 4, Messages.getQuestionIcon());
+            if (selected < 0 || selected == 4) return null;
+            if (selected == 0) {
+                var uri = java.net.URI.create(text(params, "url"));
+                if (!java.util.Set.of("http", "https").contains(uri.getScheme()) || uri.getHost() == null) {
+                    Messages.showErrorDialog(project, "Недопустимый URL MCP.", "MCP"); return null;
+                }
+                com.intellij.ide.BrowserUtil.browse(uri.toString()); return null;
+            }
+            JsonObject result = new JsonObject(); result.addProperty("action", selected == 1 ? "accept" : selected == 2 ? "decline" : "cancel"); return result;
+        }
+        boolean supported = java.util.Set.of("form", "openai/form", "openaiForm").contains(mode) && params.has("requestedSchema") && supportedSchema(params.getAsJsonObject("requestedSchema"));
         int choice = Messages.showDialog(project, "MCP: " + text(params, "serverName") + "\n" + text(params, "message")
-                        + (supported ? "\n" + params.get("requestedSchema") : "\nЭтот формат пока нельзя принять в плагине."),
-                "Запрос MCP", supported ? new String[]{"Заполнить JSON", "Отказать", "Отменить", "Позже"}
+                        + (supported ? "\nСервер просит заполнить форму данных." : "\nЭтот формат пока нельзя принять в плагине."),
+                "Запрос MCP", supported ? new String[]{"Заполнить форму", "Отказать", "Отменить", "Позже"}
                         : new String[]{"Отказать", "Отменить", "Позже"}, supported ? 3 : 2, Messages.getQuestionIcon());
         if (choice < 0 || choice == (supported ? 3 : 2)) return null;
         JsonObject result = new JsonObject();
         if (supported && choice == 0) {
-            String input = Messages.showInputDialog(project, "Введите объект JSON по показанной схеме", "Ответ MCP", Messages.getQuestionIcon());
-            if (input == null) return null;
-            try {
-                var content = JsonParser.parseString(input);
-                if (!validForm(params.getAsJsonObject("requestedSchema"), content)) throw new IllegalArgumentException();
-                result.addProperty("action", "accept"); result.add("content", content); return result;
-            } catch (RuntimeException e) { Messages.showErrorDialog(project, "Ответ не соответствует схеме. Запрос остаётся ожидающим.", "Ответ MCP"); return null; }
+            JsonObject content = McpForm.ask(params.getAsJsonObject("requestedSchema"), text(params, "message"));
+            if (content == null) return null;
+            result.addProperty("action", "accept"); result.add("content", content); return result;
         }
         result.addProperty("action", choice == (supported ? 1 : 0) ? "decline" : "cancel"); return result;
     }
-    static boolean supportedSchema(JsonObject schema) {
-        if (!text(schema, "type").equals("object") || !schema.has("properties")) return false;
-        for (var property : schema.getAsJsonObject("properties").entrySet()) {
-            if (!property.getValue().isJsonObject()) return false;
-            var field = property.getValue().getAsJsonObject();
-            if (!Set.of("string", "boolean", "integer", "number").contains(text(field, "type"))) return false;
-            if (!Set.of("type", "title", "description", "enum", "minimum", "maximum", "minLength", "maxLength", "default")
-                    .containsAll(field.keySet())) return false;
-        }
-        return true;
-    }
-    static boolean validForm(JsonObject schema, JsonElement content) {
-        if (!supportedSchema(schema) || !content.isJsonObject()) return false;
-        var object = content.getAsJsonObject(); var properties = schema.getAsJsonObject("properties");
-        if (schema.has("required")) for (var key : schema.getAsJsonArray("required")) if (!object.has(key.getAsString())) return false;
-        for (var pair : object.entrySet()) {
-            if (!properties.has(pair.getKey()) || !pair.getValue().isJsonPrimitive()) return false;
-            var field = properties.getAsJsonObject(pair.getKey()); var value = pair.getValue().getAsJsonPrimitive();
-            String type = text(field, "type");
-            if (type.equals("string") && !value.isString() || type.equals("boolean") && !value.isBoolean()) return false;
-            if (type.equals("integer") || type.equals("number")) {
-                if (!value.isNumber()) return false;
-                var number = value.getAsBigDecimal();
-                if (type.equals("integer") && number.stripTrailingZeros().scale() > 0) return false;
-                if (field.has("minimum") && number.compareTo(field.get("minimum").getAsBigDecimal()) < 0) return false;
-                if (field.has("maximum") && number.compareTo(field.get("maximum").getAsBigDecimal()) > 0) return false;
-            }
-            if (type.equals("string")) {
-                int length = value.getAsString().codePointCount(0, value.getAsString().length());
-                if (field.has("minLength") && length < field.get("minLength").getAsInt()) return false;
-                if (field.has("maxLength") && length > field.get("maxLength").getAsInt()) return false;
-            }
-            if (field.has("enum")) { boolean found = false; for (var option : field.getAsJsonArray("enum")) if (option.equals(value)) found = true; if (!found) return false; }
-        }
-        return true;
-    }
+    static boolean supportedSchema(JsonObject schema) { return McpForm.supported(schema); }
+    static boolean validForm(JsonObject schema, JsonElement content) { return McpForm.valid(schema, content); }
     private static String text(JsonObject object, String key) { return object.has(key) && object.get(key).isJsonPrimitive() ? object.get(key).getAsString() : ""; }
 }

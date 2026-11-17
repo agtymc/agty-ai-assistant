@@ -34,6 +34,14 @@ final class CodexStream {
             }
             return new ChatEvent(ACTIVITY, "turn-plan", "План", plan.toString(), false);
         }
+        if (method.equals("item/autoApprovalReview/completed")) {
+            var retry = GuardianRetry.fromNotification(p);
+            String status = p.has("review") ? string(p.getAsJsonObject("review"), "status") : "";
+            String rationale = p.has("review") ? string(p.getAsJsonObject("review"), "rationale") : "";
+            if (retry != null) retry.addProperty("eventType", "guardianDenial");
+            return new ChatEvent(ACTIVITY, string(p, "reviewId"), "Автоматическая проверка · " + status,
+                    rationale + (retry == null ? "" : "\n\nДля одного явного повтора после завершения turn используйте /approve."), true, "", retry);
+        }
         if (method.equals("thread/tokenUsage/updated")) return ChatEvent.simple(USAGE, p.get("tokenUsage").toString());
         if (method.equals("turn/completed")) {
             var turn = p.getAsJsonObject("turn");
@@ -77,7 +85,11 @@ final class CodexStream {
             case "fileChange" -> { title = "Изменения файлов · " + string(item, "status"); StringBuilder changes = new StringBuilder();
                 if (item.has("changes")) for (var change : item.getAsJsonArray("changes")) {
                     var entry = change.getAsJsonObject();
-                    changes.append("\n").append(string(entry, "path")).append("\n\n```diff\n")
+                    String operation = entry.has("kind") ? string(entry.getAsJsonObject("kind"), "type") : "";
+                    String moved = entry.has("kind") ? string(entry.getAsJsonObject("kind"), "move_path") : "";
+                    changes.append("\n").append(operation).append(" · ").append(string(entry, "path"))
+                            .append(moved.isBlank() ? "" : " → " + moved).append(" · ")
+                            .append(org.agty.aiassistant.changes.PatchSummary.of(string(entry, "diff"))).append("\n\n```diff\n")
                             .append(string(entry, "diff")).append("\n```\n");
                 }
                 value = changes.toString(); }
@@ -85,8 +97,24 @@ final class CodexStream {
             case "mcpToolCall" -> { title = "Инструмент · " + string(item, "server") + " / " + string(item, "tool"); value = item.toString(); }
             case "plan" -> { title = "План"; value = string(item, "text"); }
             case "userMessage" -> { return ChatEvent.simple(IGNORE, ""); }
-            case "hookPrompt", "functionCallOutput", "dynamicToolCall", "collabAgentToolCall", "subAgentActivity",
-                 "imageView", "sleep", "imageGeneration", "enteredReviewMode", "exitedReviewMode", "contextCompaction" -> {
+            case "collabAgentToolCall" -> {
+                title = "Агенты · " + string(item, "tool") + " · " + string(item, "status");
+                StringBuilder agents = new StringBuilder();
+                if (item.has("agentsStates")) for (var state : item.getAsJsonObject("agentsStates").entrySet())
+                    agents.append("- Агент `").append(state.getKey()).append("`: ").append(state.getValue()).append('\n');
+                value = agents + "\nОткрыть связанные чаты: /agents";
+            }
+            case "subAgentActivity" -> { title = "Подагент · " + string(item, "kind"); value = "Thread: `" + string(item, "agentThreadId") + "`\n\n/agents — открыть чат и наблюдение."; }
+            case "imageView" -> { title = "Просмотр изображения"; value = "Локальный файл: `" + string(item, "path").replace("`", "") + "`"; }
+            case "imageGeneration" -> {
+                title = "Изображение · " + string(item, "status");
+                String path = string(item, "savedPath");
+                value = path.isBlank() ? "Сгенерированное изображение" : "Файл: `" + path.replace("`", "") + "`";
+                if (item.has("fileId")) value += "\nID вложения: " + string(item, "fileId");
+                if (item.has("failure") && !item.get("failure").isJsonNull()) value += "\n" + item.get("failure");
+            }
+            case "sleep" -> { title = "Ожидание"; value = string(item, "durationMs") + " ms; ожидание прерывается вместе с задачей."; }
+            case "hookPrompt", "functionCallOutput", "dynamicToolCall", "enteredReviewMode", "exitedReviewMode", "contextCompaction" -> {
                 title = "Codex · " + type; value = item.toString();
             }
             default -> { title = "Неизвестный элемент · " + type; value = item.toString(); }

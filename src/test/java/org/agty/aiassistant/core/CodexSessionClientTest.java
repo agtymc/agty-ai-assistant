@@ -35,6 +35,28 @@ class CodexSessionClientTest {
                 () -> client.call("fixture/first", new com.google.gson.JsonObject()));
     }
 
+    @Test void independentPendingRequestsAndResolutionByAnotherClientNeverPermitSecondAnswer() throws Exception {
+        try (var client = connection(); var subscription = client.subscribe()) {
+            client.call("fixture/pending", new com.google.gson.JsonObject());
+            assertEquals(910, subscription.next().get("id").getAsInt());
+            assertEquals(911, subscription.next().get("id").getAsInt());
+            client.call("fixture/resolve", new com.google.gson.JsonObject());
+            assertEquals("serverRequest/resolved", subscription.next().get("method").getAsString());
+            var response = JsonParser.parseString("{\"decision\":\"decline\"}").getAsJsonObject();
+            assertThrows(java.io.IOException.class, () -> client.respond("910", response));
+            client.respond("911", response);
+            assertThrows(java.io.IOException.class, () -> client.respond("911", response));
+        }
+    }
+    @Test void historyLoadsPagesWithoutCollidingItemIdsAcrossTurns() throws Exception {
+        try (var client = connection()) {
+            String id = "019e309f-5fe7-7a93-90d0-ce794686cdfd";
+            var newest = client.historyPage(id, ""); assertEquals("older", newest.nextCursor());
+            var older = client.historyPage(id, newest.nextCursor()); assertEquals("", older.nextCursor());
+            assertEquals("Latest", newest.messages().getFirst().markdown); assertEquals("Earlier", older.messages().getFirst().markdown);
+            assertNotEquals(newest.messages().getFirst().id, older.messages().getFirst().id);
+        }
+    }
     @Test void importsPublicMessagesAndKeepsNativeUid() {
         var thread = JsonParser.parseString("""
             {"id":"019e309f-5fe7-7a93-90d0-ce794686cdfd","name":"My session","turns":[{"items":[

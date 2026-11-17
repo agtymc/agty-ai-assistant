@@ -15,6 +15,34 @@ class CodexStreamingTest {
         return new CodexChatProvider(List.of(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                 "-cp", System.getProperty("fixture.classes"), RpcFixture.class.getName(), mode));
     }
+    @Test void imageAttachmentsRespectScopeBeforeStartingAppServer() throws Exception {
+        Path image = directory.resolve("sample.png"); java.nio.file.Files.write(image, new byte[]{(byte) 137, 80, 78, 71, 0});
+        var policy = new org.agty.aiassistant.security.ProjectAccessPolicy(directory);
+        assertFalse(policy.path(image, false).allowed()); assertTrue(policy.image(image).allowed());
+        var outside = java.nio.file.Files.createTempFile("agty-outside-image", ".png");
+        try {
+            var options = new org.agty.aiassistant.chat.RequestOptions(directory, "", "", "",
+                    org.agty.aiassistant.chat.RequestOptions.Access.READ_ONLY, org.agty.aiassistant.chat.RequestOptions.Mode.WORK,
+                    List.of(new org.agty.aiassistant.chat.RequestOptions.Attachment("localImage", outside.toString())), false);
+            assertThrows(IllegalStateException.class, () -> provider("read").newRequest(options).run(directory, "", event -> {}));
+        } finally { java.nio.file.Files.deleteIfExists(outside); }
+    }
+    @Test void nativeReviewAndCompactionNeverBecomeOrdinaryTurnStart() throws Exception {
+        var target = new com.google.gson.JsonObject(); target.addProperty("type", "uncommittedChanges");
+        for (String mode : List.of("review", "compact")) {
+            var options = new org.agty.aiassistant.chat.RequestOptions(directory, "", "", "",
+                    org.agty.aiassistant.chat.RequestOptions.Access.READ_ONLY, org.agty.aiassistant.chat.RequestOptions.Mode.WORK,
+                    List.of(), false, false, mode.equals("review") ? target : null, mode.equals("compact"));
+            var events = new ArrayList<ChatEvent>(); provider(mode).newRequest(options).run(directory, "", events::add);
+            assertEquals(ChatEvent.Kind.DONE, events.getLast().kind());
+        }
+    }
+    @Test void observingExistingNativeSessionDoesNotStartOrReconfigureATurn() throws Exception {
+        var events = new ArrayList<ChatEvent>();
+        provider("observe").observeRequest("019e309f-5fe7-7a93-90d0-ce794686cdfd").run(directory, "", events::add);
+        assertTrue(events.stream().anyMatch(e -> e.text().equals("Observed without turn/start")));
+        assertEquals(ChatEvent.Kind.DONE, events.getLast().kind());
+    }
     @Test void interactiveApprovalIsAnsweredExactlyOnceWithoutRestartingTurn() throws Exception {
         var request = provider("interactive").newRequest(new org.agty.aiassistant.chat.RequestOptions(directory, "", "", "",
                 org.agty.aiassistant.chat.RequestOptions.Access.READ_ONLY,

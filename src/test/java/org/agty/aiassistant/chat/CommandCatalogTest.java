@@ -24,4 +24,14 @@ class CommandCatalogTest {
         assertEquals("/missing", SlashCommands.parse("/missing arg").name());
         assertEquals("/interrupt", SlashCommands.parse("/interrupt").name());
     }
+    @Test void workflowUsesKnownCommandsAndSeparateInertSteps() {
+        var steps = org.agty.aiassistant.help.CommandWorkflow.STEPS;
+        assertTrue(steps.size() >= 6);
+        for (var step : steps) {
+            assertFalse(step.title().isBlank()); assertFalse(step.text().isBlank());
+            if (step.kind().equals("command")) assertNotNull(SlashCommands.find(SlashCommands.parse(step.text()).name()));
+            else assertNull(SlashCommands.parse(step.text()));
+        }
+    }
+
 }

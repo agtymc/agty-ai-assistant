@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [master, main]
   pull_request:
@@ -33,4 +34,26 @@ jobs:
 
       - name: Test and build plugin
         shell: bash
-        run: ./gradlew test buildPlugin verifyPluginStructure --stacktrace
+        run: ./gradlew test buildPlugin verifyPluginStructure verifyPlugin --stacktrace
+
+      - name: Check generated command documentation
+        shell: bash
+        run: |
+          python3 scripts/generate_command_docs.py
+          git diff --exit-code -- docs/CODEX_COMMANDS.md
+
+      - name: Test native JCEF on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: xvfb-run -a ./gradlew test -PjcefSmoke=true --stacktrace
+
+      - name: Upload plugin and validation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-${{ matrix.os }}
+          path: |
+            build/distributions/*.zip
+            build/reports/
+            build/test-results/
+          retention-days: 14

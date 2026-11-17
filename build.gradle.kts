@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "org.agty"
-version = "0.13.0"
+version = "0.14.0"
 
 repositories {
     mavenCentral()
@@ -33,9 +33,12 @@ tasks.withType<JavaCompile>().configureEach { options.encoding = "UTF-8" }
 tasks.test {
     useJUnitPlatform()
     systemProperty("fixture.classes", sourceSets["test"].output.classesDirs.asPath)
+    systemProperty("jcef.smoke", providers.gradleProperty("jcefSmoke").getOrElse("false"))
+    systemProperty("real.codex.smoke", providers.gradleProperty("realCodexSmoke").getOrElse("false"))
 }
 
 intellijPlatform {
+    pluginVerification { ides { current() } }
     pluginConfiguration {
         ideaVersion { sinceBuild = "253"; untilBuild = "253.*" }
     }

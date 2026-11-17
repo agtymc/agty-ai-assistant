@@ -20,6 +20,26 @@ class TaskRunnerTest {
         }
         @Override public void cancel() { cancellations.incrementAndGet(); release.countDown(); }
     }
+    @Test void queuedMessageStartsAfterCompletionUsingUpdatedNativeSession() throws Exception {
+        try (var runner = new TaskRunner(Runnable::run)) {
+            var session = new ChatSessions.Session(); var first = new Request();
+            var finished = new CountDownLatch(1);
+            runner.start(session, first, directory, "first", "first", "Fixture", false);
+            assertTrue(first.entered.await(2, TimeUnit.SECONDS));
+            runner.enqueue(session, () -> {
+                assertEquals("native-latest", session.nativeSessionId);
+                return new ChatProvider.Request() {
+                    public void run(Path path, String prompt, java.util.function.Consumer<ChatEvent> events) {
+                        events.accept(new ChatEvent(ChatEvent.Kind.MESSAGE, "queued", "", prompt, true)); finished.countDown();
+                    }
+                    public void cancel() { }
+                };
+            }, directory, "queued", "queued question", "Fixture", false);
+            session.nativeSessionId = "native-latest"; session.draft = "new unsent draft"; first.release.countDown();
+            assertTrue(finished.await(3, TimeUnit.SECONDS)); assertTrue(session.queuedMessages.isEmpty());
+            assertEquals("new unsent draft", session.draft);
+        }
+    }
     @Test void writePreparationHappensBeforeProviderStartsAndCanAbortSafely() throws Exception {
         var request = new Request();
         var failed = new CountDownLatch(1);

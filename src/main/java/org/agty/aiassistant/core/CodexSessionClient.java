@@ -42,7 +42,9 @@ public final class CodexSessionClient implements AutoCloseable {
     boolean alive() { return !closed && failure.isEmpty() && process.isAlive(); }
     private void notification(JsonObject value) throws IOException {
         if (subscribers.isEmpty()) {
-            if (!notifications.offer(value)) throw new IOException("Переполнена очередь событий Codex.");
+            // No task is subscribed: native history is authoritative on the next observation.
+            // Retain a bounded diagnostics tail without killing a healthy idle connection.
+            if (!notifications.offer(value)) { notifications.poll(); notifications.offer(value); }
         } else for (var queue : subscribers)
             if (!queue.offer(value)) throw new IOException("Переполнена очередь подписчика Codex.");
     }
@@ -52,6 +54,9 @@ public final class CodexSessionClient implements AutoCloseable {
         this(List.of(CodexCommand.executable(binary), "app-server"), directory, () -> false);
     }
     CodexSessionClient(List<String> command, Path directory, java.util.function.BooleanSupplier cancelled) throws Exception {
+        this(command, directory, cancelled, false);
+    }
+    CodexSessionClient(List<String> command, Path directory, java.util.function.BooleanSupplier cancelled, boolean experimental) throws Exception {
         this.cancelled = cancelled;
         process = new ProcessBuilder(command)
                 .directory(directory.toFile()).start();
@@ -95,7 +100,9 @@ public final class CodexSessionClient implements AutoCloseable {
             catch (IOException ignored) { }
         });
         try {
-            call("initialize", JsonParser.parseString("{\"clientInfo\":{\"name\":\"agty_codex\",\"version\":\"0.6.0\"}}").getAsJsonObject());
+            JsonObject initialize = JsonParser.parseString("{\"clientInfo\":{\"name\":\"agty_codex\",\"version\":\"0.14.0\"}}").getAsJsonObject();
+            if (experimental) { var capabilities = new JsonObject(); capabilities.addProperty("experimentalApi", true); initialize.add("capabilities", capabilities); }
+            call("initialize", initialize);
             write(JsonParser.parseString("{\"method\":\"initialized\",\"params\":{}}").getAsJsonObject());
         } catch (Exception e) { close(); throw e; }
     }
@@ -196,8 +203,10 @@ public final class CodexSessionClient implements AutoCloseable {
             throw new IOException("Эта сессия принадлежит другому проекту.");
         return thread;
     }
-    static ChatSessions.Session summary(JsonObject thread) {
+    public static ChatSessions.Session summary(JsonObject thread) {
         var session = new ChatSessions.Session();
+        session.workingDirectory = string(thread, "cwd"); session.parentThreadId = string(thread, "parentThreadId");
+        session.selectedModel = string(thread, "model"); session.effectiveModel = session.selectedModel; session.reasoningEffort = string(thread, "reasoningEffort");
         session.codexId = string(thread, "id"); session.title = string(thread, "name");
         if (session.title.isBlank()) session.title = string(thread, "preview");
         session.title = session.title.replaceAll("\\s+", " ").strip();
@@ -221,6 +230,7 @@ public final class CodexSessionClient implements AutoCloseable {
                     if (event.kind() == org.agty.aiassistant.chat.ChatEvent.Kind.ACTIVITY && !event.text().isBlank()) {
                         var activity = new ChatSessions.Message(); activity.id = "codex:" + string(turn.getAsJsonObject(), "id") + ":" + event.id();
                         activity.activity = true; activity.title = event.title(); activity.markdown = event.text();
+                        if (type.equals("imageGeneration")) activity.imageData = string(item, "result");
                         session.messages.add(activity);
                     }
                     continue;

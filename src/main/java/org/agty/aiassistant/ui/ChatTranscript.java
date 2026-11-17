@@ -24,10 +24,12 @@ import java.util.*;
 import java.util.function.Consumer;
 
 public final class ChatTranscript extends JPanel implements Disposable {
-    private record Entry(String title, String markdown, boolean activity, boolean complete, String artifact) {
-        Entry(String title, String markdown, boolean activity, boolean complete) { this(title, markdown, activity, complete, ""); }
+    private record Entry(String title, String markdown, boolean activity, boolean complete, String artifact, String imageArtifact) {
+        Entry(String title, String markdown, boolean activity, boolean complete, String artifact) { this(title, markdown, activity, complete, artifact, ""); }
+        Entry(String title, String markdown, boolean activity, boolean complete) { this(title, markdown, activity, complete, "", ""); }
     }
     private final Project project;
+    private final java.util.function.Supplier<Path> directory;
     private BrowserTranscript browser;
     private final Runnable appearanceListener = this::schedule;
     private final Consumer<String> status;
@@ -49,14 +51,14 @@ public final class ChatTranscript extends JPanel implements Disposable {
         entries.forEach((id, entry) -> {
             var message = new org.agty.aiassistant.chat.ChatSessions.Message();
             message.id = id; message.title = entry.title(); message.markdown = entry.markdown();
-            message.activity = entry.activity(); message.complete = entry.complete(); message.artifact = entry.artifact(); result.add(message);
+            message.activity = entry.activity(); message.complete = entry.complete(); message.artifact = entry.artifact(); message.imageArtifact = entry.imageArtifact(); result.add(message);
         });
         return result;
     }
     public void synchronize(java.util.List<org.agty.aiassistant.chat.ChatSessions.Message> messages) {
         entries.clear();
         for (var message : messages) entries.put(message.id,
-                new Entry(message.title, message.markdown, message.activity, message.complete, message.artifact));
+                new Entry(message.title, message.markdown, message.activity, message.complete, message.artifact, message.imageArtifact));
         schedule();
     }
     public void restore(java.util.List<org.agty.aiassistant.chat.ChatSessions.Message> messages) {
@@ -65,14 +67,15 @@ public final class ChatTranscript extends JPanel implements Disposable {
         for (var message : messages) {
             if (message.activity && message.title.startsWith("Пояснение") && message.markdown.isBlank()) continue;
             entries.put(message.id, new Entry(
-                    message.title + (message.complete ? "" : " · прервано"), message.markdown, message.activity, true, message.artifact));
+                    message.title + (message.complete ? "" : " · прервано"), message.markdown, message.activity, true, message.artifact, message.imageArtifact));
         }
         schedule();
     }
 
-    public ChatTranscript(Project project, Consumer<String> status) {
+    public ChatTranscript(Project project, Consumer<String> status) { this(project, status, () -> Path.of(project.getBasePath())); }
+    public ChatTranscript(Project project, Consumer<String> status, java.util.function.Supplier<Path> directory) {
         super(new BorderLayout());
-        this.project = project;
+        this.project = project; this.directory = directory;
         this.status = status;
         markdown = new MarkdownRenderer((language, code) -> CodeHighlighting.html(project, language, code));
         view.setEditorKit(new WrappingHtmlKit());
@@ -112,16 +115,8 @@ public final class ChatTranscript extends JPanel implements Disposable {
         schedule();
     }
     private void put(String id, Entry entry) {
-        String text = entry.markdown();
-        if (text.length() > 100_000) entry = new Entry(entry.title(), text.substring(0, 100_000) + "\n\n… отображение сокращено", entry.activity(), entry.complete());
         if (entry.equals(entries.get(id))) return;
         entries.put(id, entry);
-        int length = entries.values().stream().mapToInt(e -> e.markdown().length()).sum();
-        while (entries.size() > 300 || length > 500_000) {
-            String first = entries.keySet().iterator().next();
-            length -= entries.remove(first).markdown().length();
-            expanded.remove(first);
-        }
         schedule();
     }
     private void schedule() { onChange.run(); if (!disposed && !repaintTimer.isRunning()) repaintTimer.start(); }
@@ -144,6 +139,9 @@ public final class ChatTranscript extends JPanel implements Disposable {
             html.append(MarkdownRenderer.escape(entry.title())).append(entry.complete() ? "" : " · выполняется…");
             if (entry.activity()) html.append("</a>");
             else html.append(" <a class=\"copy\" href=\"").append(markdown.action(entry.artifact().isEmpty() ? "copy" : "copy-artifact", entry.artifact().isEmpty() ? entry.markdown() : entry.artifact())).append("\">Копировать</a>");
+            if (entry.activity() && entry.title().startsWith("Изменения"))
+                html.append(" <a href=\"").append(markdown.action("changes", pair.getKey().split(":", 2)[0])).append("\">Сравнение и откат</a>");
+            if (!entry.imageArtifact().isEmpty()) html.append(" <a href=\"").append(markdown.action("image-artifact", entry.imageArtifact())).append("\">Открыть изображение</a>");
             if (!entry.artifact().isEmpty()) html.append(" <a href=\"").append(markdown.action("artifact", entry.artifact())).append("\">Полный результат</a>");
             html.append("</div>");
             if (style.equals("user")) html.append("<div class=\"usertext\">")
@@ -165,6 +163,22 @@ public final class ChatTranscript extends JPanel implements Disposable {
             case "copy" -> { CopyPasteManager.getInstance().setContents(new StringSelection(action.value())); status.accept("Скопировано"); }
             case "toggle" -> { if (!expanded.add(action.value())) expanded.remove(action.value()); render(); }
             case "open" -> open(action.value());
+            case "changes" -> {
+                var runner = project.getService(org.agty.aiassistant.execution.ChatExecutionService.class).runner();
+                var task = runner.taskByRequest(action.value());
+                if (task != null) new ChangesDialog(project, task.directory, runner, task).show();
+                else if (project.getBasePath() != null) new ChangesDialog(project, Path.of(project.getBasePath()), runner, null).show();
+            }
+            case "image-artifact" -> ApplicationManager.getApplication().executeOnPooledThread(() -> {
+                try {
+                    Path path = org.agty.aiassistant.history.MessageArtifacts.getInstance().imagePath(action.value());
+                    ApplicationManager.getApplication().invokeLater(() -> {
+                        if (disposed || project.isDisposed()) return;
+                        var file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path);
+                        if (file != null) com.intellij.openapi.application.WriteIntentReadAction.run((Runnable) () -> com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).openFile(file, true));
+                    });
+                } catch (Exception e) { ApplicationManager.getApplication().invokeLater(() -> status.accept(e.getMessage())); }
+            });
             case "artifact", "copy-artifact" -> ApplicationManager.getApplication().executeOnPooledThread(() -> {
                 try {
                     String full = org.agty.aiassistant.history.MessageArtifacts.getInstance().read(action.value());
@@ -189,7 +203,7 @@ public final class ChatTranscript extends JPanel implements Disposable {
         if (destination.matches("(?i)^https?://.*")) { BrowserUtil.browse(destination); return; }
         try {
             if (project.getBasePath() == null) throw new IllegalArgumentException("Нет каталога проекта.");
-            Path root = Path.of(project.getBasePath());
+            Path root = directory.get();
             SourceLink target = SourceLink.parse(root, destination);
             ApplicationManager.getApplication().executeOnPooledThread(() -> {
                 try {

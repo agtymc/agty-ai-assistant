@@ -4,23 +4,24 @@
 
 ## Возможности → API → UI → справка → тест
 
-| Возможность | API / контракт | UI | Справка | Проверки / этап |
+| Возможность | API / контракт | UI | Справка | Автоматические проверки |
 | --- | --- | --- | --- | --- |
-| RPC | initialize, initialized, ID → future | без UI | диагностика P2 | перемежающиеся ответы, EOF, close: CodexSessionClientTest |
-| Сессии | thread/list, read, start, resume, fork | текущие меню; фон P1 | P2/P5 | CodexSessionClientTest, CodexStreamingTest |
-| Выполнение | turn/start, interrupt; thread/resume при обрыве | сервис проекта и подписки P1 | P2 | CodexStreamingTest; фоновые чаты ещё не покрыты |
-| Права/вопросы | ServerRequest, requestUserInput, requestApproval | карточки P3 | P2/P5 | полный цикл P3; сейчас отклонение |
-| Элементы/история | ServerNotification, ThreadItem | типизированные карточки P3 | P2 | CodexStream; полный replay P3 |
-| Изменения | turn/diff/updated, fileChange | diff/откат P4 | P4 | ChangeSetTest + сохранность P4 |
-| План/ревью | collaborationMode, review/start | P5 | P5 | P5 |
-| Интеграции | skills/*, mcpServer/*, app/*, plugin/*, config/* | P5 | P5 | fixture P5 |
-| Worktree/агенты | Git + thread; collaboration items | P5 | P5 | изоляция/очередь P1/P5 |
-| Авторизация | account/* | P5 | P5 | OAuth/без секретов P5 |
-| Справочник | общий CommandDescriptor/CommandHelp | вкладка P2 | offline + Markdown P2/P5 | aliases/примеры/черновик P2/P5 |
+| RPC и восстановление | initialize, ID → future, EOF, thread/resume | сервис проекта | status, warnings | CodexSessionClientTest, CodexStreamingTest |
+| Фоновые чаты | thread/start/resume, turn/start/steer/interrupt | состояния, очередь, адресная остановка | new/resume/fork/queue/interrupt | TaskRunnerTest, CodexConnectionPoolTest, ChatRenderingTest |
+| Подтверждения | approvals, permissions, requestUserInput, MCP elicitation | ожидающие карточки, уведомления, формы | permissions/approve/mcp | ApprovalDecisionsTest, McpFormTest, CodexStreamingTest, DevelopmentWorkflowTest |
+| История и результаты | thread/items/list, ThreadItem, deltas | страницы, карточки, полный просмотр | resume/copy/export | CodexSessionClientTest, MessageArtifactsTest, JcefTranscriptTest |
+| Изменения | fileChange, turn diff, Git porcelain | построчный diff, native Diff Viewer, task/Git lists | diff/review | WorkspaceChangesTest, WorkingTreeChangesTest, DiffMarkupTest |
+| Сохранность и откат | снимок байтов/хешей, Local History | файл/hunk/задача, запрет при недостоверной базе | diff | WorkspaceChangesTest, DevelopmentWorkflowTest, ChangeSetTest |
+| План, review, goal | collaborationMode, review/start, compact/start, thread/goal/* | команды, настройки, карточки | plan/review/compact/recap/goal | CodexStreamingTest, CommandCatalogTest |
+| Интеграции | skills, mcpServer, app, plugin, hooks, config | список, явные изменения конфигурации/OAuth | skills/mcp/apps/plugins/hooks/import | McpFormTest, CommandCatalogTest; реальные внешние серверы зависят от аккаунта |
+| Worktree и агенты | Git worktree, thread/list, native observation | привязанные чаты и наблюдение | worktree/agents | WorktreeManagerTest, CodexStreamingTest, TaskRunnerTest |
+| Авторизация и модель | account/*, model/list, точная версия | OAuth, каталог и доступность | login/logout/model/speed/daybreak | CodexModelsTest, CodexCompatibilityTest, RealCodexSmokeTest |
+| Справочник | ресурсный общий каталог и workflow | офлайн editor tab, поиск, примеры | CODEX_COMMANDS.md | CommandCatalogTest, CommandAvailabilityTest, CommandHelpTest |
+| Выпуск | IDEA 253, Java 21 | ZIP, JCEF/Swing | README, changelog | test/buildPlugin/verifyPluginStructure/verifyPlugin; CI 3 ОС |
 
 ## Каждая команда эталонного CLI
 
-[Зафиксированный каталог](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/tui/src/slash_command.rs). Методы и experimental-поля сверять с bundles в protocol/0.169.0; наличие схемы не гарантирует доступность аккаунту. Точные runtime gates ещё предстоит реализовать.
+[Зафиксированный каталог](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/tui/src/slash_command.rs). Методы и experimental-поля сверять с bundles в protocol/0.169.0; наличие схемы не гарантирует доступность аккаунту. Runtime gates учитывают контракт CLI, ОС, аккаунт, экспериментальные возможности и состояние задачи.
 
 | Команда | Aliases | Классификация |
 | --- | --- | --- |
@@ -70,8 +71,8 @@
 | /pwd | /cwd | Нативный эквивалент (P2–P5) |
 | /usage | — | Нативный эквивалент (P2–P5) |
 | /debug-config | — | Нативный эквивалент (P2–P5) |
-| /title | — | Действие UI IDEA (P2/P5) |
-| /statusline | — | Действие UI IDEA (P2/P5) |
+| /title | — | Явно отложена терминальная функция |
+| /statusline | — | Явно отложена терминальная функция |
 | /theme | — | Действие UI IDEA (P2/P5) |
 | /pets | /pet | Явно отложено |
 | /mcp | — | Нативный эквивалент (P2–P5) |
@@ -90,4 +91,74 @@
 | /debug-m-drop | — | Диагностика, скрыто |
 | /debug-m-update | — | Диагностика, скрыто |
 
-Дополнения плагина: `/help` (P2), `/interrupt` (P1/P2). Текущие обработчики: `/status`, `/help`, `/model`, `/new`, `/resume`, `/permissions`, `/stop`. Семантика `/stop` пока старая (interrupt turn); миграция на остановку фоновых терминалов и alias `/clean` ожидает P2/P5. `/review` и `/diff` пока не являются реализованными slash-командами. Справочник docs/CODEX_COMMANDS.md появится на P2.
+## Фактическое состояние общего каталога 0.14.0
+
+Дополнения плагина включают `/help`, `/interrupt`, `/login`, `/queue`, `/speed`. `/stop` и alias `/clean` теперь останавливают фоновые терминалы; текущий turn прерывают `/interrupt` и ■. `/review` запускает Codex review, `/diff` открывает изменения. `/side`/`/btw` адаптированы к независимому fork, `/cd` создаёт чат нового cwd.
+
+| Каноническая команда | Aliases | Обработчик | Статья и два примера |
+| --- | --- | --- | --- |
+| /status | — | реализован | есть |
+| /help | — | реализован | есть |
+| /model | — | реализован | есть |
+| /new | — | реализован | есть |
+| /resume | — | реализован | есть |
+| /permissions | — | реализован | есть |
+| /stop | /clean | реализован | есть |
+| /interrupt | — | реализован | есть |
+| /diff | — | реализован | есть |
+| /clear | — | реализован | есть |
+| /rename | — | реализован | есть |
+| /fork | — | реализован | есть |
+| /side | /btw | реализован | есть |
+| /archive | — | реализован | есть |
+| /delete | — | реализован | есть |
+| /copy | — | реализован | есть |
+| /export | — | реализован | есть |
+| /pwd | /cwd | реализован | есть |
+| /cd | — | реализован | есть |
+| /plan | — | реализован | есть |
+| /experimental | — | реализован | есть |
+| /goal | — | реализован | есть |
+| /recap | — | реализован | есть |
+| /init | — | реализован | есть |
+| /review | — | реализован | есть |
+| /queue | — | реализован | есть |
+| /login | — | реализован | есть |
+| /logout | — | реализован | есть |
+| /usage | — | реализован | есть |
+| /ps | — | реализован | есть |
+| /skills | — | реализован | есть |
+| /mcp | — | реализован | есть |
+| /apps | — | реализован | есть |
+| /plugins | — | реализован | есть |
+| /hooks | — | реализован | есть |
+| /warnings | — | реализован | есть |
+| /config | — | реализован | есть |
+| /debug-config | — | реализован | есть |
+| /compact | — | реализован | есть |
+| /mention | — | реализован | есть |
+| /ide | — | реализован | есть |
+| /worktree | — | реализован | есть |
+| /agents | /subagents | реализован | есть |
+| /presets | — | реализован | есть |
+| /memories | — | реализован | есть |
+| /import | — | реализован | есть |
+| /feedback | — | реализован | есть |
+| /speed | — | реализован | есть |
+| /daybreak | — | реализован | есть |
+| /keymap | — | реализован | есть |
+| /vim | — | реализован | есть |
+| /theme | — | реализован | есть |
+| /quit | /exit | реализован | есть |
+| /setup-default-sandbox | — | реализован | есть |
+| /voice | — | явно отложен | есть |
+| /pets | /pet | явно отложен | есть |
+| /app | — | явно отложен | есть |
+| /raw | — | явно отложен | есть |
+| /tui | — | явно отложен | есть |
+| /daemon | — | явно отложен | есть |
+| /title | — | явно отложен | есть |
+| /statusline | — | явно отложен | есть |
+| /approve | — | реализован | есть |
+
+Статьи и статусы генерируются из `src/main/resources/commands/catalog.json` в [CODEX_COMMANDS.md](CODEX_COMMANDS.md). Наличие обработчика не означает проверку каждой внешней интеграции конкретного аккаунта; границы приёмки приведены в [P4_P6_VALIDATION.md](P4_P6_VALIDATION.md).

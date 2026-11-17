@@ -9,8 +9,13 @@ import java.util.*;
 @State(name = "AgtyChatSessions", storages = @Storage(value = "agty-chat-sessions.xml", roamingType = RoamingType.DISABLED))
 public final class ChatSessions implements PersistentStateComponent<ChatSessions.Data> {
     public static final class Message {
-        public String id = "", title = "", markdown = "", artifact = "";
+        public String id = "", title = "", markdown = "", artifact = "", imageArtifact = "";
+        @com.intellij.util.xmlb.annotations.Transient public String imageData = "";
         public boolean activity, complete = true;
+    }
+    public static final class ContextSource {
+        public String title = "", path = "", text = "";
+        public int startLine, endLine;
     }
     public static final class Session {
         public String id = UUID.randomUUID().toString(), title = "Новая сессия", history = "", draft = "";
@@ -18,7 +23,15 @@ public final class ChatSessions implements PersistentStateComponent<ChatSessions
         public String providerId = "codex", nativeSessionId = "";
         public String remoteId() { return !nativeSessionId.isEmpty() ? nativeSessionId : providerId.equals("codex") ? codexId : ""; }
         public boolean customTitle;
-        public boolean closed;
+        public boolean planMode;
+        public String workingDirectory = "";
+        public String serviceTier = "", cyberAccessProgram = "";
+        public boolean closed, archived;
+        public String parentThreadId = "";
+        public List<ContextSource> contextSources = new ArrayList<>();
+        public List<String> imagePaths = new ArrayList<>();
+        public boolean includeContext = true, autoEditorContext = true;
+        public List<String> queuedMessages = new ArrayList<>();
         public List<String> promptHistory = new ArrayList<>();
         public String historyCursor = "";
         public String tokenUsage = "", effectiveModel = "", selectedModel = "", reasoningEffort = "", confirmedThreadId = "";
@@ -30,6 +43,8 @@ public final class ChatSessions implements PersistentStateComponent<ChatSessions
         public boolean writeAccess;
         public boolean unrestrictedAccess;
         public boolean interactiveApprovals;
+        public boolean experimentalApi;
+        public Map<String, String> presets = new LinkedHashMap<>();
         public Map<String, String> providerSelections = new LinkedHashMap<>();
         public List<Session> sessions = new ArrayList<>();
         public Session current() {

@@ -10,8 +10,8 @@ public interface ChatProvider {
             throw new IllegalStateException("Провайдер пока не поддерживает режим Plan.");
         if (!options.attachments().isEmpty())
             throw new IllegalStateException("Передайте текстовый контекст в prompt; типизированные вложения пока не поддержаны.");
-        return newRequest(options.sessionId(), options.access() != RequestOptions.Access.READ_ONLY,
-                options.model(), options.effort(), options.fork(), options.access() == RequestOptions.Access.FULL);
+        return scoped(newRequest(options.sessionId(), options.access() != RequestOptions.Access.READ_ONLY,
+                options.model(), options.effort(), options.fork(), options.access() == RequestOptions.Access.FULL), options);
     }
     default Request newRequest(String sessionId) { return newRequest(); }
     default Request newRequest(String sessionId, boolean writeAccess) {
@@ -35,9 +35,21 @@ public interface ChatProvider {
         if (unrestrictedAccess) throw new IllegalStateException("Этот провайдер не поддерживает режим без ограничений.");
         return newRequest(sessionId, writeAccess, model, effort, forkForModel);
     }
+    static Request scoped(Request request, RequestOptions options) {
+        return new Request() {
+            public void run(Path directory, String prompt, Consumer<ChatEvent> events) throws Exception {
+                if (!directory.toRealPath().equals(options.directory().toRealPath())) throw new IllegalStateException("Каталог запроса отличается от зафиксированной области доступа.");
+                request.run(directory, prompt, events);
+            }
+            public void cancel() { request.cancel(); }
+            public void respond(String id, com.google.gson.JsonObject response) throws Exception { request.respond(id, response); }
+            public void steer(String prompt) throws Exception { request.steer(prompt); }
+        };
+    }
     interface Request {
         void run(Path directory, String prompt, Consumer<ChatEvent> events) throws Exception;
         void cancel();
+        default void steer(String prompt) throws Exception { throw new IllegalStateException("Провайдер не поддерживает уточнение активной задачи."); }
         default void respond(String id, com.google.gson.JsonObject response) throws Exception {
             throw new IllegalStateException("Провайдер не поддерживает ответы на запросы сервера.");
         }

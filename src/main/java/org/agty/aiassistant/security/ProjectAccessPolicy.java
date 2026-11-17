@@ -35,7 +35,9 @@ public final class ProjectAccessPolicy {
         return Verdict.allow();
     }
 
-    public Verdict path(Path path, boolean writeAccess) {
+    public Verdict path(Path path, boolean writeAccess) { return path(path, writeAccess, true); }
+    public Verdict image(Path path) { return path(path, false, false); }
+    private Verdict path(Path path, boolean writeAccess, boolean textOnly) {
         Path normalized = path.isAbsolute() ? path.normalize() : root.resolve(path).normalize();
         if (!normalized.startsWith(root)) return Verdict.deny("Путь выходит за пределы проекта.");
         Path checked = existingPath(normalized);
@@ -45,13 +47,13 @@ public final class ProjectAccessPolicy {
         } catch (IOException e) {
             return Verdict.deny("Путь проекта недоступен: " + checked);
         }
-        Path relative = realRoot.relativize(normalized);
+        Path relative = root.relativize(normalized);
         if (isDefaultExcluded(relative)) return Verdict.deny("Путь исключён из AI-контекста: " + printable(relative));
         Rule matched = matchedRule(relative);
         if (matched != null && matched.exclude)
             return Verdict.deny("Путь исключён правилом " + matched.source + ": " + printable(relative));
         if (writeAccess && Files.isDirectory(normalized)) return Verdict.allow();
-        if (looksBinary(normalized)) return Verdict.deny("Бинарные файлы не передаются в AI-контекст.");
+        if (textOnly && looksBinary(normalized)) return Verdict.deny("Бинарные файлы не передаются в AI-контекст.");
         return Verdict.allow();
     }
 

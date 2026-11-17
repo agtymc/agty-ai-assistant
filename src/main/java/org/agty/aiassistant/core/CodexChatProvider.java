@@ -12,22 +12,28 @@ import java.util.function.Consumer;
 public final class CodexChatProvider implements ChatProvider {
     private final List<String> serverCommand;
     private final CodexConnectionPool pool;
-    public CodexChatProvider(String binary) { this(List.of(CodexCommand.executable(binary), "app-server")); }
+    private final boolean experimental;
+    private boolean verifyVersion;
+    public CodexChatProvider(String binary) { this(List.of(CodexCommand.executable(binary), "app-server")); verifyVersion = true; }
     CodexChatProvider(List<String> command) { this(command, null); }
-    CodexChatProvider(List<String> command, CodexConnectionPool pool) { serverCommand = List.copyOf(command); this.pool = pool; }
+    CodexChatProvider(List<String> command, CodexConnectionPool pool) { serverCommand = List.copyOf(command); this.pool = pool; this.experimental = false; }
     public CodexChatProvider(String binary, CodexConnectionPool pool) {
-        this(List.of(CodexCommand.executable(binary), "app-server"), pool);
+        this(List.of(CodexCommand.executable(binary), "app-server"), pool); verifyVersion = true;
+    }
+    public CodexChatProvider(String binary, CodexConnectionPool pool, boolean experimental) {
+        serverCommand = List.of(CodexCommand.executable(binary), "app-server"); this.pool = pool; this.experimental = experimental; verifyVersion = true;
     }
     private CodexSessionClient connect(Path directory, java.util.function.BooleanSupplier cancelled) throws Exception {
-        return pool == null ? new CodexSessionClient(serverCommand, directory, cancelled) : pool.acquire(serverCommand, directory);
+        if (verifyVersion) CodexCompatibility.require(serverCommand.getFirst(), directory);
+        return pool == null ? new CodexSessionClient(serverCommand, directory, cancelled, experimental) : pool.acquire(serverCommand, directory, experimental);
     }
     @Override public String name() { return "Codex"; }
     @Override public Request newRequest(RequestOptions options) {
-        if (options.mode() != RequestOptions.Mode.WORK || !options.attachments().isEmpty())
+        if (options.mode() == RequestOptions.Mode.PLAN && !experimental)
             throw new IllegalStateException("Этот режим или тип вложений ещё не поддерживается.");
-        return createRequest(options.sessionId(), options.access() != RequestOptions.Access.READ_ONLY,
+        return ChatProvider.scoped(createRequest(options.sessionId(), options.access() != RequestOptions.Access.READ_ONLY,
                 options.model(), options.effort(), options.fork(), options.access() == RequestOptions.Access.FULL,
-                options.interactiveApprovals());
+                options.interactiveApprovals(), options.mode(), options.reviewTarget(), options.compact(), false, options.serviceTier(), options.cyberAccessProgram(), options.attachments(), null), options);
     }
     @Override public Request newRequest() { return newRequest("", false); }
     @Override public Request newRequest(String sessionId) { return newRequest(sessionId, false); }
@@ -45,10 +51,19 @@ public final class CodexChatProvider implements ChatProvider {
     }
     @Override public Request newRequest(String sessionId, boolean writeAccess, String model, String effort,
                                         boolean forkForModel, boolean unrestrictedAccess) {
-        return createRequest(sessionId, writeAccess, model, effort, forkForModel, unrestrictedAccess, false);
+        return createRequest(sessionId, writeAccess, model, effort, forkForModel, unrestrictedAccess, false, RequestOptions.Mode.WORK, null, false, false, "", "", List.of(), null);
+    }
+    public Request observeRequest(String sessionId) {
+        if (sessionId.isBlank()) throw new IllegalArgumentException("Нужен thread ID.");
+        return createRequest(sessionId, false, "", "", false, false, false, RequestOptions.Mode.WORK, null, false, true, "", "", List.of(), null);
+    }
+    public Request retryRequest(String sessionId, JsonObject event) {
+        if (!experimental) throw new IllegalStateException("Повтор требует экспериментального контракта.");
+        if (!CodexStream.string(event, "status").equals("denied") || CodexStream.string(event, "id").isBlank()) throw new IllegalArgumentException("Нет исходного события отказа.");
+        return createRequest(sessionId, true, "", "", false, false, false, RequestOptions.Mode.WORK, null, false, true, "", "", List.of(), event.deepCopy());
     }
     private Request createRequest(String sessionId, boolean writeAccess, String model, String effort,
-                                  boolean forkForModel, boolean unrestrictedAccess, boolean interactive) {
+                                  boolean forkForModel, boolean unrestrictedAccess, boolean interactive, RequestOptions.Mode mode, JsonObject reviewTarget, boolean compact, boolean observe, String serviceTier, String cyberAccessProgram, List<RequestOptions.Attachment> attachments, JsonObject retry) {
         if (unrestrictedAccess) writeAccess = true;
         boolean canWrite = writeAccess;
         boolean fullAccess = unrestrictedAccess;
@@ -57,6 +72,14 @@ public final class CodexChatProvider implements ChatProvider {
             private volatile CodexSessionClient client;
             private volatile String activeThreadId = "";
             private volatile String activeTurnId = "";
+            @Override public void steer(String prompt) throws Exception {
+                var connection = client;
+                if (connection == null || activeThreadId.isBlank() || activeTurnId.isBlank() || cancelled)
+                    throw new IllegalStateException("Задача ещё не запущена или уже завершилась.");
+                JsonObject params = new JsonObject(); params.addProperty("threadId", activeThreadId); params.addProperty("expectedTurnId", activeTurnId);
+                JsonObject text = new JsonObject(); text.addProperty("type", "text"); text.addProperty("text", prompt);
+                JsonArray input = new JsonArray(); input.add(text); params.add("input", input); connection.call("turn/steer", params);
+            }
             @Override public void respond(String id, JsonObject response) throws Exception {
                 var connection = client;
                 if (connection == null || cancelled) throw new IllegalStateException("Задача больше не ожидает ответа.");
@@ -74,7 +97,13 @@ public final class CodexChatProvider implements ChatProvider {
             }
             @Override public void run(Path directory, String prompt, Consumer<ChatEvent> events) throws Exception {
                 if (cancelled) throw new CancellationException();
-                new ProjectAccessPolicy(directory).request(canWrite).requireAllowed();
+                var accessPolicy = new ProjectAccessPolicy(directory); accessPolicy.request(canWrite).requireAllowed();
+                for (var attachment : attachments) {
+                    if (!attachment.kind().equals("localImage")) throw new IllegalArgumentException("Неподдерживаемый тип вложения.");
+                    Path path = Path.of(attachment.value()); accessPolicy.image(path).requireAllowed();
+                    if (!java.nio.file.Files.isRegularFile(path) || java.nio.file.Files.size(path) > 20L * 1024 * 1024)
+                        throw new IllegalArgumentException("Изображение недоступно или превышает 20 MiB.");
+                }
                 CodexSessionClient connection = connect(directory, () -> cancelled);
                 CodexSessionClient.Subscription subscription = connection.subscribe();
                 boolean turnSettled = false;
@@ -85,6 +114,12 @@ public final class CodexChatProvider implements ChatProvider {
                         var available = CodexModels.resolve(CodexModels.list(connection), model);
                         if (!available.model().equals(model))
                             throw new IllegalStateException("Выбрана неизвестная модель Codex: " + model);
+                        if (!attachments.isEmpty() && !available.inputModalities().contains("image"))
+                            throw new IllegalStateException("Эта модель не поддерживает изображения.");
+                        if (!serviceTier.isBlank() && !serviceTier.equals("default") && available.serviceTiers().stream().noneMatch(t -> t.id().equals(serviceTier)))
+                            throw new IllegalStateException("Скорость не предоставлена аккаунту для этой модели.");
+                        if (!cyberAccessProgram.isBlank() && !cyberAccessProgram.equals("standard") && (available.cyberPrograms() == null || !available.cyberPrograms().contains(cyberAccessProgram)))
+                            throw new IllegalStateException("Специальный режим не предоставлен аккаунту для этой модели.");
                         if (!effort.isBlank() && available.efforts().stream().noneMatch(option -> option.value().equals(effort)))
                             throw new IllegalStateException("Модель " + model + " не поддерживает уровень рассуждения " + effort + ".");
                     }
@@ -100,26 +135,77 @@ public final class CodexChatProvider implements ChatProvider {
                         params.addProperty("excludeTurns", true);
                     }
                     if (forkForModel && sessionId.isBlank()) throw new IllegalStateException("Нельзя ответвить сессию без UID.");
+                    if (observe) {
+                        params = new JsonObject(); params.addProperty("threadId", sessionId); params.addProperty("excludeTurns", true);
+                    }
                     var thread = connection.call(sessionId.isBlank() ? "thread/start" : forkForModel ? "thread/fork" : "thread/resume", params);
                     String actualModel = CodexStream.string(thread, "model");
                     if (!model.isBlank() && !model.equals(actualModel))
                         throw new IllegalStateException("Codex не переключил модель: выбрана " + model + ", сервер вернул "
                                 + (actualModel.isBlank() ? "неизвестную модель" : actualModel) + ". Запрос не отправлен.");
+                    if (model.isBlank() && (!attachments.isEmpty() || !serviceTier.isBlank() || !cyberAccessProgram.isBlank())) {
+                        var available = CodexModels.resolve(CodexModels.list(connection), actualModel);
+                        if (!attachments.isEmpty() && !available.inputModalities().contains("image"))
+                            throw new IllegalStateException("Эта модель не поддерживает изображения.");
+                        if (!serviceTier.isBlank() && !serviceTier.equals("default") && available.serviceTiers().stream().noneMatch(t -> t.id().equals(serviceTier)))
+                            throw new IllegalStateException("Скорость не предоставлена аккаунту для этой модели.");
+                        if (!cyberAccessProgram.isBlank() && !cyberAccessProgram.equals("standard") && (available.cyberPrograms() == null || !available.cyberPrograms().contains(cyberAccessProgram)))
+                            throw new IllegalStateException("Специальный режим не предоставлен аккаунту для этой модели.");
+                    }
                     String id = thread.getAsJsonObject("thread").get("id").getAsString();
                     activeThreadId = id;
                     events.accept(ChatEvent.simple(ChatEvent.Kind.SESSION, id));
                     events.accept(ChatEvent.simple(ChatEvent.Kind.MODEL, actualModel));
                     JsonObject turn = turnParams(directory, id, prompt, canWrite, fullAccess);
                     turn.addProperty("approvalPolicy", interactive && !fullAccess ? "on-request" : "never");
+                    for (var attachment : attachments) {
+                        JsonObject image = new JsonObject(); image.addProperty("type", attachment.kind()); image.addProperty("path", Path.of(attachment.value()).toRealPath().toString());
+                        turn.getAsJsonArray("input").add(image);
+                    }
                     if (!model.isBlank()) turn.addProperty("model", model);
+                    if (!serviceTier.isBlank()) turn.addProperty("serviceTierForTurn", serviceTier);
+                    if (!cyberAccessProgram.isBlank()) {
+                        if (!experimental) throw new IllegalStateException("Для специального режима требуется экспериментальный контракт.");
+                        turn.addProperty("cyberAccessProgram", cyberAccessProgram);
+                    }
                     if (!effort.isBlank()) turn.addProperty("effort", effort);
-                    var started = connection.call("turn/start", turn);
-                    String turnId = started.getAsJsonObject("turn").get("id").getAsString();
-                    activeTurnId = turnId;
-                    if (cancelled) { interruptTurn(connection, id, turnId); turnSettled = true; throw new CancellationException(); }
+                    if (experimental) {
+                        var collaboration = new JsonObject(); collaboration.addProperty("mode", mode == RequestOptions.Mode.PLAN ? "plan" : "default");
+                        var settings = new JsonObject(); settings.addProperty("model", actualModel);
+                        if (!effort.isBlank()) settings.addProperty("reasoning_effort", effort);
+                        collaboration.add("settings", settings); turn.add("collaborationMode", collaboration);
+                    }
+                    if (cancelled) throw new CancellationException();
                     var stream = new CodexStream();
+                    JsonObject observedTurn = null;
+                    JsonObject started;
+                    if (observe) {
+                        if (retry != null) {
+                            var approval = new JsonObject(); approval.addProperty("threadId", id); approval.add("event", retry.deepCopy());
+                            connection.call("thread/approveGuardianDeniedAction", approval);
+                        }
+                        var query = new JsonObject(); query.addProperty("threadId", id); query.addProperty("limit", 1);
+                        query.addProperty("itemsView", "full"); query.addProperty("sortDirection", "desc");
+                        var turns = connection.call("thread/turns/list", query).getAsJsonArray("data");
+                        if (turns.isEmpty()) { turnSettled = true; return; }
+                        observedTurn = turns.get(0).getAsJsonObject();
+                        for (var event : stream.replay(observedTurn)) events.accept(event);
+                        if (!CodexStream.string(observedTurn, "status").equals("inProgress")) { turnSettled = true; return; }
+                        started = new JsonObject(); started.add("turn", observedTurn);
+                        events.accept(ChatEvent.simple(ChatEvent.Kind.STATUS, "Наблюдение за нативной задачей"));
+                    } else if (compact) {
+                        JsonObject paramsCompact = new JsonObject(); paramsCompact.addProperty("threadId", id);
+                        connection.call("thread/compact/start", paramsCompact); started = null;
+                    } else if (reviewTarget == null) started = connection.call("turn/start", turn);
+                    else {
+                        JsonObject review = new JsonObject(); review.addProperty("threadId", id); review.addProperty("delivery", "inline"); review.add("target", reviewTarget.deepCopy());
+                        started = connection.call("review/start", review);
+                    }
+                    String turnId = compact ? "" : started.getAsJsonObject("turn").get("id").getAsString();
+                    activeTurnId = turnId;
+                    if (cancelled && !turnId.isBlank()) { interruptTurn(connection, id, turnId); turnSettled = true; throw new CancellationException(); }
                     while (true) {
-                        if (cancelled) { interruptTurn(connection, id, turnId); turnSettled = true; throw new CancellationException(); }
+                        if (cancelled && !turnId.isBlank()) { interruptTurn(connection, id, turnId); turnSettled = true; throw new CancellationException(); }
                         JsonObject notification;
                         try {
                             notification = subscription.next();
@@ -135,7 +221,15 @@ public final class CodexChatProvider implements ChatProvider {
                         if (notification == null) continue;
                         var p = notification.getAsJsonObject("params");
                         if (p == null || !id.equals(CodexStream.string(p, "threadId"))) continue;
+                        if (compact && CodexStream.string(notification, "method").equals("thread/compacted")) {
+                            turnSettled = true;
+                            events.accept(new ChatEvent(ChatEvent.Kind.ACTIVITY, "compaction", "Контекст сжат", "Нативная compaction завершена. Файлы не изменялись.", true));
+                            if (cancelled) throw new CancellationException();
+                            events.accept(ChatEvent.simple(ChatEvent.Kind.DONE, "Готово")); return;
+                        }
                         String eventTurn = CodexStream.string(p, "turnId");
+                        if (compact && turnId.isBlank() && !eventTurn.isBlank()) { turnId = eventTurn; activeTurnId = turnId; }
+                        if (compact && turnId.isBlank() && p.has("turn") && p.get("turn").isJsonObject()) { turnId = CodexStream.string(p.getAsJsonObject("turn"), "id"); activeTurnId = turnId; }
                         if (!eventTurn.isEmpty() && !eventTurn.equals(turnId)) continue;
                         if (p.has("turn") && !turnId.equals(CodexStream.string(p.getAsJsonObject("turn"), "id"))) continue;
                         if (notification.has("id")) {
@@ -149,8 +243,8 @@ public final class CodexChatProvider implements ChatProvider {
                         }
                         if (CodexStream.string(notification, "method").equals("model/rerouted")) {
                             String routedModel = CodexStream.string(p, "toModel");
+                            events.accept(ChatEvent.simple(ChatEvent.Kind.MODEL, routedModel));
                             if (!model.isBlank() && !model.equals(routedModel)) {
-                                events.accept(ChatEvent.simple(ChatEvent.Kind.MODEL, routedModel));
                                 throw new IllegalStateException("Codex переключил модель на " + routedModel + " вместо " + model
                                         + ". Запрос остановлен.");
                             }
@@ -229,6 +323,7 @@ public final class CodexChatProvider implements ChatProvider {
         };
     }
     private void interruptTurn(CodexSessionClient connection, String threadId, String turnId) {
+        if (threadId.isBlank() || turnId.isBlank()) return;
         if (pool == null) { connection.interrupt(threadId, turnId); return; }
         JsonObject params = new JsonObject(); params.addProperty("threadId", threadId); params.addProperty("turnId", turnId);
         try { connection.call("turn/interrupt", params); }

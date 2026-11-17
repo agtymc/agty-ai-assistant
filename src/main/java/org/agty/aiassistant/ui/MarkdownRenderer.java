@@ -57,6 +57,10 @@ public final class MarkdownRenderer {
                         }
                     }
                     private void code(HtmlWriter out, String language, String code) {
+                        if (language.equals("diff") || language.equals("patch")) {
+                            out.raw("<div class=\"codehead\">diff <a href=\"" + action("copy", code) + "\">Копировать diff</a></div><div class=\"codeblock\">" + DiffMarkup.render(code) + "</div>");
+                            return;
+                        }
                         out.raw("<div class=\"codehead\">" + escape(language.isBlank() ? "text" : language)
                                 + " &nbsp; <a href=\"" + action("copy", code) + "\">Копировать код</a></div><div class=\"codeblock\"><code>"
                                 + (browser ? highlight.apply(language, code) : codeWhitespace(highlight.apply(language, code))) + "</code></div>");

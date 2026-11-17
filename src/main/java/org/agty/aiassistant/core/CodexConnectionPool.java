@@ -6,11 +6,24 @@ import java.util.concurrent.*;
 
 /** Owns only this project's processes. Startup never holds the disposal lock. */
 public final class CodexConnectionPool implements AutoCloseable {
-    private record Key(List<String> command, Path directory) { }
+    private record Key(List<String> command, Path directory, boolean experimental) { }
     private final Map<Key, CompletableFuture<CodexSessionClient>> clients = new HashMap<>();
     private boolean closed;
+    private volatile boolean defaultExperimental;
+    public void setExperimental(boolean enabled) {
+        List<CompletableFuture<CodexSessionClient>> previous;
+        synchronized (this) {
+            if (defaultExperimental == enabled) return;
+            defaultExperimental = enabled; previous = List.copyOf(clients.values()); clients.clear();
+        }
+        previous.forEach(future -> future.thenAccept(CodexSessionClient::close));
+    }
     CodexSessionClient acquire(List<String> command, Path directory) throws Exception {
-        var key = new Key(List.copyOf(command), directory.toRealPath());
+        return acquire(command, directory, false);
+    }
+    CodexSessionClient acquire(List<String> command, Path directory, boolean experimental) throws Exception {
+        boolean effectiveExperimental = experimental || defaultExperimental;
+        var key = new Key(List.copyOf(command), directory.toRealPath(), effectiveExperimental);
         CompletableFuture<CodexSessionClient> future;
         boolean creator;
         synchronized (this) {
@@ -24,7 +37,7 @@ public final class CodexConnectionPool implements AutoCloseable {
         }
         if (creator) {
             try {
-                var connection = new CodexSessionClient(command, directory, () -> false);
+                var connection = new CodexSessionClient(command, directory, () -> false, effectiveExperimental);
                 synchronized (this) {
                     if (closed) { connection.close(); throw new IllegalStateException("Проект закрыт."); }
                     future.complete(connection);
@@ -39,7 +52,28 @@ public final class CodexConnectionPool implements AutoCloseable {
         catch (ExecutionException e) { throw new java.io.IOException("Не удалось запустить Codex.", e.getCause()); }
     }
     private CodexSessionClient local(String binary, Path directory) throws Exception {
-        return acquire(List.of(CodexCommand.executable(binary), "app-server"), directory);
+        CodexCompatibility.require(binary, directory);
+        return acquire(List.of(CodexCommand.executable(binary), "app-server"), directory, defaultExperimental);
+    }
+    public com.google.gson.JsonObject call(String binary, Path directory, boolean experimental, String method, com.google.gson.JsonObject params) throws Exception {
+        CodexCompatibility.require(binary, directory);
+        var connection = acquire(List.of(CodexCommand.executable(binary), "app-server"), directory, experimental || defaultExperimental);
+        if (params != null) for (String key : List.of("threadId", "ancestorThreadId", "parentThreadId"))
+            if (params.has(key) && !params.get(key).isJsonNull()) connection.readThread(params.get(key).getAsString(), directory, false);
+        var result = connection.call(method, params);
+        if (Set.of("thread/list", "app/list", "mcpServerStatus/list", "thread/backgroundTerminals/list").contains(method)
+                && result != null && result.has("data") && result.get("data").isJsonArray()) {
+            var seen = new HashSet<String>();
+            var merged = result.deepCopy(); var page = result;
+            while (page.has("nextCursor") && !page.get("nextCursor").isJsonNull() && !page.get("nextCursor").getAsString().isBlank()) {
+                String cursor = page.get("nextCursor").getAsString();
+                if (!seen.add(cursor) || seen.size() > 100) throw new java.io.IOException("Некорректная или слишком большая пагинация каталога Codex.");
+                var next = params == null ? new com.google.gson.JsonObject() : params.deepCopy(); next.addProperty("cursor", cursor);
+                page = connection.call(method, next); merged.getAsJsonArray("data").addAll(page.getAsJsonArray("data"));
+            }
+            merged.remove("nextCursor"); return merged;
+        }
+        return result;
     }
     public java.util.List<CodexModels.Model> models(String binary, Path directory) throws Exception {
         return CodexModels.list(local(binary, directory));

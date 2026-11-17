@@ -82,6 +82,44 @@ class ChatRenderingTest {
             } finally { panel.dispose(); }
         });
     }
+    @Test void compactControlsStayInsideLogicalWidthsAtAllSupportedScales() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            float previous = com.intellij.ui.scale.JBUIScale.scale(1f);
+            var previousLaf = UIManager.getLookAndFeel();
+            try {
+                for (String theme : new String[]{"light", "dark"}) {
+                    try { UIManager.setLookAndFeel(theme.equals("dark") ? new com.intellij.ide.ui.laf.darcula.DarculaLaf() : new javax.swing.plaf.metal.MetalLookAndFeel()); }
+                    catch (UnsupportedLookAndFeelException e) { throw new AssertionError(e); }
+                    for (float scale : new float[]{1f, 1.5f, 2f}) {
+                        com.intellij.ui.scale.JBUIScale.setUserScaleFactor(scale);
+                        for (int width : new int[]{320, 360, 480}) {
+                            var panel = new AiAssistantChatPanel(project, () -> { throw new AssertionError("No request expected"); });
+                            try {
+                                ((JButton) named(panel, "session-menu")).setText("Очень длинное название задачи с путём src/main/java/example/LongName.java");
+                                int pixels = Math.round(width * scale), height = Math.round(720 * scale);
+                                panel.setSize(pixels, height); layoutTree(panel);
+                                for (String name : java.util.List.of("session-menu", "request-options", "add-context", "context-preview")) {
+                                    var control = named(panel, name); assertNotNull(control, name);
+                                    var bounds = SwingUtilities.convertRectangle(control.getParent(), control.getBounds(), panel);
+                                    assertTrue(bounds.x >= 0 && bounds.x + bounds.width <= pixels, name + " at " + width + "/" + scale);
+                                    assertTrue(bounds.width > 0 && bounds.height > 0, name);
+                                }
+                                var image = new java.awt.image.BufferedImage(pixels, height, java.awt.image.BufferedImage.TYPE_INT_RGB);
+                                var graphics = image.createGraphics(); panel.paint(graphics); graphics.dispose();
+                                try {
+                                    var path = java.nio.file.Path.of("build/reports/screenshots/" + theme + "-" + width + "-" + Math.round(scale * 100) + ".png");
+                                    java.nio.file.Files.createDirectories(path.getParent()); javax.imageio.ImageIO.write(image, "png", path.toFile());
+                                } catch (java.io.IOException e) { throw new AssertionError(e); }
+                            } finally { panel.dispose(); }
+                        }
+                    }
+                }
+            } finally {
+                com.intellij.ui.scale.JBUIScale.setUserScaleFactor(previous);
+                try { UIManager.setLookAndFeel(previousLaf); } catch (UnsupportedLookAndFeelException e) { throw new AssertionError(e); }
+            }
+        });
+    }
     @Test void statusButtonRunsCommandAndStatusIsBelowChat() throws Exception {
         AtomicReference<Throwable> failure = new AtomicReference<>();
         SwingUtilities.invokeAndWait(() -> {

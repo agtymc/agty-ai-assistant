@@ -12,12 +12,15 @@ import java.util.function.Consumer;
 
 /** Local document only: no remote scripts, images, frames or network connections. */
 final class BrowserTranscript implements Disposable {
-    private final JBCefBrowser browser = new JBCefBrowser();
-    private final JBCefJSQuery actions = JBCefJSQuery.create((JBCefBrowserBase) browser);
+    private final JBCefBrowser browser;
+    private final JBCefJSQuery actions;
     private String latest = "";
     private boolean follow = true, resetScroll;
     private volatile boolean ready, disposed;
-    BrowserTranscript(Consumer<String> activate) {
+    BrowserTranscript(Consumer<String> activate) { this(activate, false); }
+    BrowserTranscript(Consumer<String> activate, boolean offscreen) {
+        browser = JBCefBrowser.createBuilder().setOffScreenRendering(offscreen).build();
+        actions = JBCefJSQuery.create((JBCefBrowserBase) browser);
         actions.addHandler(value -> {
             ApplicationManager.getApplication().invokeLater(() -> { if (!disposed) activate.accept(value); });
             return new JBCefJSQuery.Response("");
