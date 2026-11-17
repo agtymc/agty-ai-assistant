@@ -32,8 +32,14 @@ public final class ChatExecutionService implements Disposable {
                 var documents = com.intellij.openapi.fileEditor.FileDocumentManager.getInstance();
                 for (var document : documents.getUnsavedDocuments()) {
                     var file = documents.getFile(document);
-                    if (file != null && file.isInLocalFileSystem() && file.toNioPath().toAbsolutePath().normalize().startsWith(task.directory))
-                        documents.saveDocument(document);
+                    if (file != null && file.isInLocalFileSystem()) {
+                        try {
+                            if (org.agty.aiassistant.changes.WorkspaceChanges.canonical(file.toNioPath()).startsWith(task.directory)) {
+                                documents.saveDocument(document);
+                                if (documents.isDocumentUnsaved(document)) throw new IllegalStateException("Не удалось сохранить документ перед задачей: " + file.getPath());
+                            }
+                        } catch (java.io.IOException e) { throw new IllegalStateException("Не удалось проверить путь несохранённого документа: " + file.getPath(), e); }
+                    }
                 }
                 com.intellij.history.LocalHistory.getInstance().putSystemLabel(project, "Codex task " + task.id);
             });
@@ -61,6 +67,7 @@ public final class ChatExecutionService implements Disposable {
         }, this);
         var notified = new java.util.HashSet<String>();
         runner.subscribe(task -> {
+            if (!task.active() && !project.isDisposed()) com.intellij.openapi.vfs.VirtualFileManager.getInstance().asyncRefresh(null);
             for (String id : task.pending.keySet()) {
                 if (!notified.add(task.id + ":" + id)) continue;
                 var notification = com.intellij.notification.NotificationGroupManager.getInstance()

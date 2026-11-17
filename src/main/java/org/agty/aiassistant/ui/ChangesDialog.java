@@ -107,13 +107,12 @@ final class ChangesDialog extends DialogWrapper {
                 ApplicationManager.getApplication().invokeAndWait(() -> WriteAction.run(() -> {
                     try {
                         var documents = FileDocumentManager.getInstance();
-                        for (var change : selected) for (String name : List.of(change.source(), change.target())) {
-                            var file = LocalFileSystem.getInstance().findFileByNioFile(root.resolve(name));
-                            if (file != null) {
-                                var doc = documents.getCachedDocument(file);
-                                if (doc != null && documents.isDocumentUnsaved(doc))
-                                    throw new IllegalStateException("Есть несохранённые документы. Откройте сравнение; автоматический откат запрещён.");
-                            }
+                        var paths = new java.util.HashSet<Path>();
+                        for (var change : selected) for (String name : List.of(change.source(), change.target())) paths.add(task.workspace.root().resolve(name).normalize());
+                        for (var document : documents.getUnsavedDocuments()) {
+                            var file = documents.getFile(document);
+                            if (file != null && file.isInLocalFileSystem() && paths.contains(WorkspaceChanges.canonical(file.toNioPath())))
+                                throw new IllegalStateException("Есть несохранённые документы. Откройте сравнение; автоматический откат запрещён.");
                         }
                         // Keep document edits excluded through validation, writes and VFS refresh.
                         if (hunk) task.workspace.rollbackHunk(selected.getFirst(), index); else task.workspace.rollback(selected);

@@ -48,16 +48,16 @@ public final class WorkspaceChanges implements AutoCloseable {
         } catch (Exception e) { tracker.close(); throw e; }
     }
     public Path root() { return root; }
+    /** Resolve existing aliases/junctions while retaining the suffix of a not-yet-existing file. */
+    public static Path canonical(Path file) throws IOException {
+        Path absolute = file.toAbsolutePath().normalize(), existing = absolute;
+        while (existing != null && !Files.exists(existing)) existing = existing.getParent();
+        if (existing == null) throw new IOException("Путь недоступен: " + file);
+        return existing.toRealPath().resolve(existing.relativize(absolute)).normalize();
+    }
     public void markEdited(Path file) {
-        try {
-            Path absolute = file.toAbsolutePath().normalize(), existing = absolute;
-            while (existing != null && !Files.exists(existing)) existing = existing.getParent();
-            if (existing != null) {
-                // Windows may report an 8.3 alias while the snapshot uses the expanded real path.
-                Path canonical = existing.toRealPath().resolve(existing.relativize(absolute));
-                edited.add(relative(safe(canonical.toString())));
-            }
-        } catch (IOException ignored) { }
+        try { edited.add(relative(safe(canonical(file).toString()))); }
+        catch (IOException ignored) { }
     }
     public synchronized void report(String itemId, JsonObject item) {
         if (item != null && item.has("changes")) items.put(itemId, item.deepCopy());

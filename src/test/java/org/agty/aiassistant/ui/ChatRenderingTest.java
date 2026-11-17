@@ -63,7 +63,7 @@ class ChatRenderingTest {
     }
     @Test void externalVfsReloadDoesNotBecomeUserEditButTypingStillDisablesRollback() throws Exception {
         var root = java.nio.file.Files.createTempDirectory("agty-editor-tracking"); var path = root.resolve("file.txt");
-        java.nio.file.Files.writeString(path, "original\n");
+        java.nio.file.Files.writeString(path, "disk old\n");
         var runner = project.getService(org.agty.aiassistant.execution.ChatExecutionService.class).runner();
         var session = new org.agty.aiassistant.chat.ChatSessions.Session();
         var entered = new java.util.concurrent.CountDownLatch(1); var release = new java.util.concurrent.CountDownLatch(1);
@@ -77,12 +77,14 @@ class ChatRenderingTest {
                 assertNotNull(file);
                 com.intellij.openapi.application.ReadAction.run(() -> document.set(com.intellij.openapi.fileEditor.FileDocumentManager.getInstance().getDocument(file)));
                 assertNotNull(document.get(), "Expected a text document: " + file.getFileType().getName());
+                com.intellij.openapi.command.WriteCommandAction.runWriteCommandAction(project, () -> document.get().setText("original\n"));
                 try { taskRef.set(runner.start(session, new org.agty.aiassistant.chat.ChatProvider.Request() {
                     public void run(java.nio.file.Path directory, String prompt, java.util.function.Consumer<ChatEvent> events) throws Exception { entered.countDown(); release.await(); }
                     public void cancel() { release.countDown(); }
                 }, root, "", "test", "Fixture", true)); } catch (Exception e) { throw new AssertionError(e); }
             });
             assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS), taskRef.get().status);
+            assertEquals("original\n", java.nio.file.Files.readString(path), "Preflight must save the actual cwd document before capturing its base");
             java.nio.file.Files.writeString(path, "agent\n");
             com.intellij.testFramework.EdtTestUtil.runInEdtAndWait(() -> com.intellij.openapi.application.WriteAction.run(() -> {
                 var file = com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path);
