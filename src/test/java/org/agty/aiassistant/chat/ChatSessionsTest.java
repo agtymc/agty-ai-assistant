@@ -70,6 +70,17 @@ class ChatSessionsTest {
         assertEquals("different project", restored.project("/projects/second").current().draft);
     }
 
+    @Test void nativeReloadKeepsLegacyMessagesInAnAccessiblePersistentArchiveWithoutDuplicatingNativeItems() {
+        var session = new ChatSessions.Session(); var old = new ChatSessions.Message(); old.id = "local-item"; old.markdown = "user history";
+        session.messages.add(old);
+        var nativeMessage = new ChatSessions.Message(); nativeMessage.id = "codex:turn:item"; nativeMessage.markdown = "native history";
+        session.replaceNativeMessages(java.util.List.of(nativeMessage));
+        session.replaceNativeMessages(java.util.List.of(nativeMessage));
+        assertEquals(1, session.messages.size()); assertEquals(1, session.localArchive.size());
+        var restored = XmlSerializer.deserialize(XmlSerializer.serialize(session), ChatSessions.Session.class);
+        assertEquals("user history", restored.localArchive.getFirst().markdown);
+        assertEquals("native history", restored.messages.getFirst().markdown);
+    }
     @Test void migratesLegacyPathHistoryToStableProjectIdentity() {
         ChatSessions store = new ChatSessions();
         var legacy = store.project("/old/path/project");

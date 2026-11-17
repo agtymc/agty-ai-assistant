@@ -96,6 +96,7 @@ class ChatRenderingTest {
                             var panel = new AiAssistantChatPanel(project, () -> { throw new AssertionError("No request expected"); });
                             try {
                                 ((JButton) named(panel, "session-menu")).setText("Очень длинное название задачи с путём src/main/java/example/LongName.java");
+                                scaleFonts(panel, scale);
                                 int pixels = Math.round(width * scale), height = Math.round(720 * scale);
                                 panel.setSize(pixels, height); layoutTree(panel);
                                 for (String name : java.util.List.of("session-menu", "request-options", "add-context", "context-preview")) {
@@ -119,6 +120,10 @@ class ChatRenderingTest {
                 try { UIManager.setLookAndFeel(previousLaf); } catch (UnsupportedLookAndFeelException e) { throw new AssertionError(e); }
             }
         });
+    }
+    private static void scaleFonts(Component component, float scale) {
+        if (component.getFont() != null) component.setFont(component.getFont().deriveFont(component.getFont().getSize2D() * scale));
+        if (component instanceof Container container) for (Component child : container.getComponents()) scaleFonts(child, scale);
     }
     @Test void statusButtonRunsCommandAndStatusIsBelowChat() throws Exception {
         AtomicReference<Throwable> failure = new AtomicReference<>();

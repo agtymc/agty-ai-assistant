@@ -41,7 +41,8 @@ public final class ChatExecutionService implements Disposable {
             if (event.kind() != org.agty.aiassistant.chat.ChatEvent.Kind.MESSAGE && event.kind() != org.agty.aiassistant.chat.ChatEvent.Kind.ACTIVITY) return event;
             var message = new org.agty.aiassistant.chat.ChatSessions.Message(); message.markdown = event.text(); message.complete = event.complete();
             if (event.details() != null && event.details().has("type") && event.details().get("type").getAsString().equals("imageGeneration")
-                    && event.details().has("result") && !event.details().has("fileId")) message.imageData = event.details().get("result").getAsString();
+                    && event.details().has("result") && event.details().get("result").isJsonPrimitive()
+                    && (!event.details().has("fileId") || event.details().get("fileId").isJsonNull())) message.imageData = event.details().get("result").getAsString();
             try { org.agty.aiassistant.history.MessageArtifacts.getInstance().offload(message); }
             catch (java.io.IOException e) { throw new IllegalStateException("Не удалось сохранить полный результат.", e); }
             var details = event.details() == null ? null : event.details().deepCopy();

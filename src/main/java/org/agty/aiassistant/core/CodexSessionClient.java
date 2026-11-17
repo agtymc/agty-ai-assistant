@@ -230,7 +230,7 @@ public final class CodexSessionClient implements AutoCloseable {
                     if (event.kind() == org.agty.aiassistant.chat.ChatEvent.Kind.ACTIVITY && !event.text().isBlank()) {
                         var activity = new ChatSessions.Message(); activity.id = "codex:" + string(turn.getAsJsonObject(), "id") + ":" + event.id();
                         activity.activity = true; activity.title = event.title(); activity.markdown = event.text();
-                        if (type.equals("imageGeneration")) activity.imageData = string(item, "result");
+                        if (type.equals("imageGeneration") && (!item.has("fileId") || item.get("fileId").isJsonNull())) activity.imageData = string(item, "result");
                         session.messages.add(activity);
                     }
                     continue;

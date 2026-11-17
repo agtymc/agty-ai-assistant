@@ -19,6 +19,8 @@ public final class RpcFixture {
         emit("{\"method\":\"" + method + "\",\"params\":{\"threadId\":\"" + currentThread + "\"," + fields + "}}");
     }
     public static void main(String[] args) throws Exception {
+        System.setOut(new java.io.PrintStream(System.out, true, StandardCharsets.UTF_8));
+        System.setErr(new java.io.PrintStream(System.err, true, StandardCharsets.UTF_8));
         String mode = args[0];
         try (var input = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
             String line;

@@ -751,7 +751,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
                     var selected = sessions.sessions.stream().filter(s -> s.providerId.equals("codex") && s.remoteId().equals(id)).findFirst().orElse(null);
                     if (selected == null) { selected = found; sessions.sessions.add(selected); }
                     else if (!found.messages.isEmpty() && (taskRunner.task(selected.id) == null || !taskRunner.task(selected.id).active()))
-                        selected.messages = found.messages;
+                        selected.replaceNativeMessages(found.messages);
                     selected.historyCursor = found.historyCursor;
                     active = null; elapsedTimer.stop();
                     session = selected; session.closed = false; sessions.selected = session.id;
@@ -822,7 +822,9 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         JMenuItem copy = new JMenuItem("Копировать UID");
         copy.addActionListener(e -> com.intellij.openapi.ide.CopyPasteManager.getInstance().setContents(
                 new java.awt.datatransfer.StringSelection(session.remoteId().isEmpty() ? session.id : session.remoteId())));
-        menu.add(copy); menu.addSeparator();
+        menu.add(copy);
+        JMenuItem localArchive = new JMenuItem("Сохранённая локальная история…"); localArchive.setEnabled(!session.localArchive.isEmpty());
+        localArchive.addActionListener(e -> showLocalArchive()); menu.add(localArchive); menu.addSeparator();
         JMenuItem close = new JMenuItem("Завершить текущую сессию");
         close.addActionListener(e -> finishSession()); menu.add(close); menu.addSeparator();
         ButtonGroup group = new ButtonGroup();
@@ -834,6 +836,21 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
             group.add(entry); menu.add(entry);
         }
         return menu;
+    }
+    private void showLocalArchive() {
+        var messages = java.util.List.copyOf(session.localArchive);
+        ApplicationManager.getApplication().executeOnPooledThread(() -> {
+            try {
+                StringBuilder text = new StringBuilder("# Локальные сообщения до перечитывания Codex\n\n");
+                for (var message : messages) text.append("## ").append(message.title).append("\n\n")
+                        .append(org.agty.aiassistant.history.MessageArtifacts.getInstance().text(message)).append("\n\n");
+                ApplicationManager.getApplication().invokeLater(() -> {
+                    if (disposed || project.isDisposed()) return;
+                    var file = new com.intellij.testFramework.LightVirtualFile("Локальная история.md", text.toString()); file.setWritable(false);
+                    com.intellij.openapi.application.WriteIntentReadAction.run((Runnable) () -> com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).openFile(file, true));
+                });
+            } catch (Exception e) { ApplicationManager.getApplication().invokeLater(() -> { if (!disposed) status.setText(e.getMessage()); }); }
+        });
     }
     private void finishSession() {
         String provider = session.providerId;

@@ -36,6 +36,20 @@ public final class ChatSessions implements PersistentStateComponent<ChatSessions
         public String historyCursor = "";
         public String tokenUsage = "", effectiveModel = "", selectedModel = "", reasoningEffort = "", confirmedThreadId = "";
         public List<Message> messages = new ArrayList<>();
+        public List<Message> localArchive = new ArrayList<>();
+        public void replaceNativeMessages(List<Message> nativeMessages) {
+            var preserved = new HashSet<String>(); localArchive.forEach(message -> preserved.add(message.id));
+            if (messages.isEmpty() && !history.isBlank() && preserved.add("legacy-transcript-" + id)) {
+                var legacy = new Message(); legacy.id = "legacy-transcript-" + id;
+                legacy.title = "Прежняя локальная история"; legacy.markdown = history; localArchive.add(legacy);
+            }
+            for (var message : messages) {
+                if (message.id.startsWith("codex:")) continue;
+                if (message.id.isBlank()) message.id = "legacy-" + UUID.randomUUID();
+                if (preserved.add(message.id)) localArchive.add(message);
+            }
+            messages = new ArrayList<>(nativeMessages);
+        }
         @Override public String toString() { return title + "  ·  " + (remoteId().isEmpty() ? "локальная " + id.substring(0, 8) : remoteId()); }
     }
     public static final class ProjectSessions {

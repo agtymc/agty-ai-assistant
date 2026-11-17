@@ -130,7 +130,8 @@ final class SessionCommandActions {
                     JFileChooser chooser = new JFileChooser(); chooser.setSelectedFile(new java.io.File("codex-chat.md"));
                     if (chooser.showSaveDialog(null) != JFileChooser.APPROVE_OPTION) return true;
                     Path output = chooser.getSelectedFile().toPath(); if (Files.exists(output) && !confirm("Перезаписать " + output + "?")) return true;
-                    var messages = List.copyOf(current().messages);
+                    var messages = new ArrayList<>(current().localArchive);
+                    messages.addAll(current().messages);
                     ApplicationManager.getApplication().executeOnPooledThread(() -> {
                         try {
                             StringBuilder markdown = new StringBuilder();

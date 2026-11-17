@@ -12,7 +12,7 @@ class WorktreeManagerTest {
         String output = new String(process.getInputStream().readAllBytes()); assertEquals(0, process.waitFor(), output);
     }
     @Test void createsIsolatedBranchWithoutChangingOriginalDirtyFiles() throws Exception {
-        git("init"); Files.writeString(root.resolve("file"), "base\n"); git("add", "file");
+        git("init"); git("config", "core.autocrlf", "false"); Files.writeString(root.resolve("file"), "base\n"); git("add", "file");
         git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Initial");
         Files.writeString(root.resolve("file"), "user draft\n");
         Path target = root.resolve("isolated"); WorktreeManager.create(root, target, "fixture-worktree");
