@@ -3,14 +3,18 @@ package org.agty.aiassistant.ui;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.command.CommandProcessor;
+import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.fileChooser.FileChooser;
 import com.intellij.openapi.fileChooser.FileChooserDescriptor;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.options.ShowSettingsUtil;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.IconLoader;
+import com.intellij.openapi.util.TextRange;
 import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.psi.PsiDocumentManager;
+import com.intellij.psi.codeStyle.CodeStyleManager;
 import com.intellij.ui.components.JBScrollPane;
 import com.intellij.ui.components.JBTextArea;
 import com.intellij.util.ui.JBUI;
@@ -51,6 +55,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
     private final JButton contextButton = new JButton("Просмотр");
     private final JButton clearContextButton = new JButton("×");
     private final JButton reviewButton = new JButton("Review");
+    private final JButton undoReviewButton = new JButton("Undo");
     private final JButton clear = new JButton("Новая сессия");
     private final com.intellij.openapi.ui.ComboBox<ChatProviderRegistry.Choice> providerPicker = new com.intellij.openapi.ui.ComboBox<>() {
         @Override public int getMinimumPopupWidth() {
@@ -71,6 +76,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
     private final boolean nativeSessions;
     private final JLabel sessionLabel = new JLabel();
     private final JToggleButton access = new JToggleButton();
+    private final JToggleButton unrestricted = new JToggleButton("Без ограничений");
     private int historyPosition = -1;
     private String historyDraft = "";
     private boolean navigatingHistory;
@@ -85,10 +91,19 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
     private final JProgressBar progress = new JProgressBar();
     private final StringBuilder history = new StringBuilder();
     private final java.util.List<ContextItem> pinnedContext = new java.util.ArrayList<>();
+    private java.util.Map<String, String> lastReviewBackup = java.util.Map.of();
+    private String suggestedDiff = "";
+    private final org.agty.aiassistant.execution.TaskRunner taskRunner;
+    private final AutoCloseable taskSubscription;
+    private final JButton olderHistoryButton = new JButton("Загрузить предыдущие сообщения");
+    private final JButton pendingRequestButton = new JButton("Требуется ответ");
+    private final JButton requestOptionsButton = new JButton("Параметры запроса ▾");
     private ChatProvider.Request active;
     private String activeRequestId = "";
     private String pendingQuestion = "";
     private boolean disposed;
+    private int commandIndex = -1;
+    private String highlightedCommand = "/help";
     private static final int MAX_HISTORY = 100_000;
     private static final int MAX_DISPLAY = 500_000;
 
@@ -103,6 +118,10 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         super(new BorderLayout(0, 8));
         this.nativeSessions = nativeSessions;
         this.project = project;
+        taskRunner = project.getService(org.agty.aiassistant.execution.ChatExecutionService.class).runner();
+        taskSubscription = taskRunner.subscribe(task -> {
+            if (!disposed && task.session == session) showTask(task);
+        });
         this.providers = providers;
         ProjectIdentity identity = ProjectIdentity.getInstance(project);
         sessions = ApplicationManager.getApplication().getService(ChatSessions.class)
@@ -123,24 +142,35 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         JPanel toolbar = new JPanel(new BorderLayout());
         JLabel titleLabel = new JLabel("AI Chat", IconLoader.getIcon("/icons/agty.svg", AiAssistantChatPanel.class), SwingConstants.LEADING);
         titleLabel.setIconTextGap(JBUI.scale(6));
-        toolbar.add(titleLabel, BorderLayout.WEST);
+        sessionMenuButton.setIcon(titleLabel.getIcon());
+        sessionMenuButton.setMinimumSize(new Dimension(0, 28));
+        toolbar.add(sessionMenuButton, BorderLayout.CENTER);
         JPanel menus = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
         sessionMenuButton.addActionListener(e -> sessionMenu().show(sessionMenuButton, 0, sessionMenuButton.getHeight()));
-        JButton settings = new JButton("⚙"); settings.setToolTipText("Настройки чата");
+        JButton settings = new JButton("⋯"); settings.setToolTipText("Настройки чата");
         settings.addActionListener(e -> {
             JPopupMenu menu = new JPopupMenu();
             JMenuItem connection = new JMenuItem("Подключения…");
             connection.addActionListener(a -> ShowSettingsUtil.getInstance().showSettingsDialog(project, "AGTY AI Assistant"));
             JMenuItem appearance = new JMenuItem("Оформление чата…");
             appearance.addActionListener(a -> ShowSettingsUtil.getInstance().showSettingsDialog(project, "Оформление чата"));
-            menu.add(connection); menu.add(appearance); menu.show(settings, 0, settings.getHeight());
+            JMenuItem help = new JMenuItem("Справочник команд");
+            help.addActionListener(a -> showCommandHelp("")); menu.add(help);
+            menu.add(connection); menu.add(appearance); menu.addSeparator();
+            JMenuItem statusAction = new JMenuItem("Статус"); statusAction.addActionListener(a -> statusButton.doClick()); menu.add(statusAction);
+            JMenuItem reviewAction = new JMenuItem("Импортировать patch…"); reviewAction.addActionListener(a -> reviewButton.doClick()); menu.add(reviewAction);
+            JMenuItem undoAction = new JMenuItem("Откатить ручной patch"); undoAction.setEnabled(undoReviewButton.isEnabled());
+            undoAction.addActionListener(a -> undoReviewButton.doClick()); menu.add(undoAction);
+            menu.show(settings, 0, settings.getHeight());
         });
         JButton commands = new JButton("/"); commands.setToolTipText("Команды чата");
         commands.addActionListener(e -> commandMenu("").show(commands, 0, commands.getHeight()));
-        menus.add(commands); menus.add(sessionMenuButton); menus.add(settings); toolbar.add(menus, BorderLayout.EAST);
+        menus.add(clear); menus.add(settings); toolbar.add(menus, BorderLayout.EAST);
         add(toolbar, BorderLayout.NORTH);
         JPanel chatArea = new JPanel(new BorderLayout());
         chatArea.add(transcript, BorderLayout.CENTER);
+        olderHistoryButton.setVisible(false); olderHistoryButton.addActionListener(e -> loadOlderHistory());
+        chatArea.add(olderHistoryButton, BorderLayout.NORTH);
         JPanel chatStatus = new JPanel(new BorderLayout(0, 2));
         chatStatus.setName("chat-status-bar");
         progress.setIndeterminate(true); progress.setVisible(false); progress.setPreferredSize(new Dimension(0, 2));
@@ -182,11 +212,19 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         sessionLabel.setFont(sessionLabel.getFont().deriveFont(11f));
         sessionLabel.setMinimumSize(new Dimension(0, 16));
         JPanel context = new JPanel(new BorderLayout(4, 0));
-        context.add(sessionLabel, BorderLayout.CENTER);
+        context.add(contextButton, BorderLayout.CENTER);
         access.setName("access-mode"); access.setSelected(sessions.writeAccess); updateAccessLabel();
         access.setToolTipText("Доступ выбранного провайдера с последующего запроса. Запись ограничена каталогом проекта.");
         access.setPreferredSize(new Dimension(150, 24));
         access.addActionListener(e -> { sessions.writeAccess = access.isSelected(); updateAccessLabel(); });
+        unrestricted.setName("unrestricted-mode"); unrestricted.setSelected(sessions.unrestrictedAccess);
+        unrestricted.setToolTipText("Отключить sandbox Codex: разрешить сеть, .git и доступ к файлам вне проекта.");
+        unrestricted.addActionListener(e -> {
+            if (unrestricted.isSelected() && !confirmUnrestrictedAccess()) unrestricted.setSelected(false);
+            sessions.unrestrictedAccess = unrestricted.isSelected();
+            if (sessions.unrestrictedAccess) sessions.writeAccess = true;
+            updateAccessLabel();
+        });
         statusButton.setName("status-command");
         statusButton.setToolTipText("Показать /status текущей сессии");
         statusButton.addActionListener(e -> executeCommand(new SlashCommands.Invocation("/status", "")));
@@ -205,10 +243,25 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         reviewButton.setName("diff-review");
         reviewButton.setToolTipText("Проверить и применить unified diff");
         reviewButton.addActionListener(e -> showDiffReviewDialog());
+        undoReviewButton.setName("undo-diff-review");
+        undoReviewButton.setToolTipText("Откатить последний применённый diff-review");
+        undoReviewButton.setEnabled(false);
+        undoReviewButton.addActionListener(e -> undoLastReview());
         JPanel contextActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
-        contextActions.add(includeContext); contextActions.add(addContextButton); contextActions.add(contextButton);
-        contextActions.add(clearContextButton); contextActions.add(reviewButton); contextActions.add(access); contextActions.add(statusButton);
-        context.add(contextActions, BorderLayout.EAST); bottom.add(context, BorderLayout.NORTH);
+        contextActions.add(includeContext); contextActions.add(clearContextButton);
+        context.add(contextActions, BorderLayout.EAST);
+        pendingRequestButton.setVisible(false);
+        pendingRequestButton.addActionListener(e -> {
+            var task = taskRunner.task(session.id);
+            if (task == null || task.pending.isEmpty()) return;
+            var pending = task.pending.entrySet().iterator().next();
+            var response = ServerRequestDialog.answer(project, pending.getValue());
+            if (response != null) {
+                try { taskRunner.respond(session.id, pending.getKey(), response); }
+                catch (IllegalStateException ex) { status.setText(ex.getMessage()); }
+            }
+        });
+        context.add(pendingRequestButton, BorderLayout.NORTH); bottom.add(context, BorderLayout.NORTH);
         bottom.add(editor, BorderLayout.CENTER);
         for (var choice : providers) providerPicker.addItem(choice);
         providerPicker.setName("llm-picker");
@@ -225,7 +278,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         providerPicker.setPreferredSize(JBUI.size(280, 26));
         providerPicker.setMaximumRowCount(16);
         JPanel controls = new JPanel(new BorderLayout(4, 0));
-        controls.add(providerPicker, BorderLayout.CENTER);
+
         JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
         effortPicker.setName("reasoning-effort");
         effortPicker.getAccessibleContext().setAccessibleName("Уровень рассуждения");
@@ -239,7 +292,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
             effortPicker.setToolTipText(selected.description());
             saveSession();
         });
-        actions.add(effortPicker);
+
         send.setText("↑"); send.setToolTipText("Отправить (Enter)");
         send.getAccessibleContext().setAccessibleName("Отправить сообщение");
         stop.setText("■"); stop.setToolTipText("Остановить запрос");
@@ -251,16 +304,29 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
             var size = control.getPreferredSize();
             control.setPreferredSize(new Dimension(size.width, controlHeight));
         }
+        JPanel inputActions = new JPanel(new FlowLayout(FlowLayout.LEFT, 2, 0));
+        inputActions.add(addContextButton); inputActions.add(commands); controls.add(inputActions, BorderLayout.WEST);
         actions.add(stop); actions.add(send); controls.add(actions, BorderLayout.EAST);
         JPanel footer = new JPanel(new BorderLayout(0, 2));
-        footer.add(controls, BorderLayout.NORTH);
+        JPanel parameters = new JPanel(); parameters.setLayout(new BoxLayout(parameters, BoxLayout.Y_AXIS));
+        for (JComponent component : java.util.List.of(providerPicker, effortPicker, access, unrestricted)) {
+            component.setAlignmentX(Component.LEFT_ALIGNMENT);
+            component.setMaximumSize(new Dimension(Integer.MAX_VALUE, controlHeight));
+            component.setMinimumSize(new Dimension(0, controlHeight)); parameters.add(component);
+        }
+        parameters.setVisible(false);
+        requestOptionsButton.setName("request-options");
+        requestOptionsButton.addActionListener(e -> { parameters.setVisible(!parameters.isVisible()); revalidate(); });
+        JPanel parameterArea = new JPanel(new BorderLayout());
+        parameterArea.add(requestOptionsButton, BorderLayout.NORTH); parameterArea.add(parameters, BorderLayout.CENTER);
+        footer.add(controls, BorderLayout.NORTH); footer.add(parameterArea, BorderLayout.CENTER);
         bottom.add(footer, BorderLayout.SOUTH); add(bottom, BorderLayout.SOUTH);
         stop.setEnabled(false); stop.setVisible(false);
         send.addActionListener(e -> send()); stop.addActionListener(e -> cancel());
-        clear.setText("+ Новый чат");
+        clear.setText("+"); clear.setToolTipText("Новый чат");
         clear.addActionListener(e -> {
             String providerId = session.providerId;
-            cancel(); saveSession(); var created = sessions.create(); created.providerId = providerId;
+            saveSession(); var created = sessions.create(); created.providerId = providerId;
             selectSession(created);
         });
         providerPicker.addActionListener(e -> {
@@ -297,6 +363,14 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         ChatInput.configure(input, this::send);
         input.getInputMap().put(KeyStroke.getKeyStroke("UP"), "previous-prompt");
         input.getInputMap().put(KeyStroke.getKeyStroke("DOWN"), "next-prompt");
+        input.getInputMap().put(KeyStroke.getKeyStroke("ESCAPE"), "hide-commands");
+        input.getActionMap().put("hide-commands", new AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent e) { hideCommands(); updateHistoryNavigation(); }
+        });
+        input.getInputMap().put(KeyStroke.getKeyStroke("F1"), "command-help");
+        input.getActionMap().put("command-help", new AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent e) { showCommandHelp(highlightedCommand); }
+        });
         input.getActionMap().put("previous-prompt", new AbstractAction() {
             @Override public void actionPerformed(java.awt.event.ActionEvent event) { navigateHistory(-1); }
         });
@@ -312,13 +386,24 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         if (nativeSessions) loadModels(false, "");
         if (nativeSessions && session.providerId.equals("codex")) {
             refreshCodexSessions();
-            if (!session.remoteId().isEmpty()) readCodexSession(session.remoteId());
+            if (active == null && !session.remoteId().isEmpty()) readCodexSession(session.remoteId());
         }
     }
 
     private void updateAccessLabel() {
-        access.setText(access.isSelected() ? "Редактирование" : "Только чтение");
+        if (sessions.unrestrictedAccess) sessions.writeAccess = true;
+        access.setSelected(sessions.writeAccess);
+        unrestricted.setSelected(sessions.unrestrictedAccess);
+        access.setText(sessions.writeAccess ? sessions.interactiveApprovals ? "Auto" : "Редактирование" : "Только чтение");
         access.getAccessibleContext().setAccessibleName("Режим: " + access.getText());
+        unrestricted.getAccessibleContext().setAccessibleName("Режим без ограничений");
+        access.setEnabled(active == null && !readingSession && !sessions.unrestrictedAccess);
+    }
+    private boolean confirmUnrestrictedAccess() {
+        return Messages.showYesNoDialog(project,
+                "Codex получит доступ к сети, .git, файлам вне проекта и сможет запускать команды без sandbox.\n\n"
+                        + "Включайте этот режим только для доверенной задачи и проекта.",
+                "Включить режим без ограничений?", Messages.getWarningIcon()) == Messages.YES;
     }
     private void editedInput() {
         if (!navigatingHistory) historyPosition = -1;
@@ -328,7 +413,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
     private void updateHistoryNavigation() {
         var up = KeyStroke.getKeyStroke("UP");
         var down = KeyStroke.getKeyStroke("DOWN");
-        if (input.getText().isEmpty() || historyPosition >= 0) {
+        if (commandSuggestions.isVisible() || input.getText().isEmpty() || historyPosition >= 0) {
             input.getInputMap().put(up, "previous-prompt");
             input.getInputMap().put(down, "next-prompt");
         } else {
@@ -337,6 +422,16 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         }
     }
     private void navigateHistory(int direction) {
+        if (commandSuggestions.isVisible()) {
+            int count = commandSuggestions.getComponentCount();
+            if (count > 0) {
+                commandIndex = Math.floorMod(commandIndex + direction, count);
+                if (commandSuggestions.getComponent(commandIndex) instanceof JMenuItem item) {
+                    MenuSelectionManager.defaultManager().setSelectedPath(new MenuElement[]{commandSuggestions, item});
+                }
+            }
+            return;
+        }
         var prompts = session.promptHistory;
         if (prompts.isEmpty()) return;
         if (historyPosition < 0) {
@@ -373,29 +468,48 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
     private JPopupMenu commandMenu(String prefix) {
         JPopupMenu menu = new JPopupMenu();
         for (var command : SlashCommands.available(session.providerId)) {
-            if (!command.name().startsWith(prefix)) continue;
+            String query = prefix.startsWith("/") ? prefix.substring(1) : prefix;
+            if (!(command.name() + " " + command.description() + " " + command.category()).toLowerCase(java.util.Locale.ROOT)
+                    .contains(query.toLowerCase(java.util.Locale.ROOT))) continue;
             JMenuItem item = new JMenuItem(command.name() + " — " + command.description());
+            item.setToolTipText(command.category() + " · " + command.syntax() + " · F1: описание и примеры");
+            item.addChangeListener(e -> { if (item.isArmed()) highlightedCommand = command.name(); });
             item.addActionListener(e -> {
-                if (command.name().equals("/resume") || command.name().equals("/permissions")) {
-                    input.setText(command.name() + " "); input.requestFocusInWindow();
-                } else executeCommand(new SlashCommands.Invocation(command.name(), ""));
+                hideCommands();
+                input.setText(command.name() + (command.syntax().equals(command.name()) ? "" : " "));
+                input.requestFocusInWindow(); updateHistoryNavigation();
             });
+            var documentation = new JPopupMenu(); var description = new JMenuItem("Описание и примеры");
+            description.addActionListener(e -> showCommandHelp(command.name())); documentation.add(description);
+            item.setComponentPopupMenu(documentation);
             menu.add(item);
         }
         return menu;
     }
+    private void showCommandHelp(String command) {
+        project.getService(org.agty.aiassistant.help.CommandHelpService.class).open(command, example -> {
+            if (disposed) return;
+            String draft = input.getText();
+            input.setText(draft.isBlank() ? example : draft + "\n" + example);
+            input.requestFocusInWindow();
+        });
+    }
+    private void hideCommands() {
+        commandSuggestions.setVisible(false); commandIndex = -1; updateHistoryNavigation();
+    }
     private void suggestCommands() {
         SwingUtilities.invokeLater(() -> {
             if (disposed) return;
-            String prefix = input.getText().strip();
-            if (!input.isShowing() || !prefix.matches("/[a-z]*")) { commandSuggestions.setVisible(false); return; }
-            commandSuggestions.removeAll();
+            String prefix = input.getText();
+            if (!input.isShowing() || !prefix.matches("/[^\\s]*")) { hideCommands(); return; }
+            commandIndex = -1; commandSuggestions.removeAll();
             var menu = commandMenu(prefix);
             while (menu.getComponentCount() > 0) commandSuggestions.add(menu.getComponent(0));
             if (commandSuggestions.getComponentCount() > 0) {
                 commandSuggestions.setFocusable(false);
                 commandSuggestions.show(input, 0, -commandSuggestions.getPreferredSize().height);
-            } else commandSuggestions.setVisible(false);
+                updateHistoryNavigation();
+            } else hideCommands();
         });
     }
     void executeCommand(SlashCommands.Invocation command) {
@@ -403,13 +517,13 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         if (SlashCommands.available(session.providerId).stream().noneMatch(c -> c.name().equals(command.name()))) {
             transcript.message("Команда", "Команда `" + command.name().replace("`", "") + "` не поддерживается. Введите `/help`. Она не отправлена модели."); return;
         }
-        if (!command.argument().isBlank() && !command.name().equals("/resume") && !command.name().equals("/permissions") && !command.name().equals("/model")) {
+        if (!command.argument().isBlank() && !command.name().equals("/resume") && !command.name().equals("/permissions") && !command.name().equals("/model") && !command.name().equals("/help")) {
             transcript.message("Команда", "У этой команды нет аргументов. Введите `/help`."); return;
         }
         switch (command.name()) {
-            case "/help" -> transcript.message("Команды", SlashCommands.help(session.providerId));
+            case "/help" -> showCommandHelp(command.argument());
             case "/new" -> clear.doClick();
-            case "/stop" -> { cancel(); status.setText("Остановлено"); }
+            case "/stop", "/interrupt" -> cancel();
             case "/resume" -> {
                 if (command.argument().isBlank()) {
                     if (sessionMenuButton.isShowing()) sessionMenu().show(sessionMenuButton, 0, sessionMenuButton.getHeight());
@@ -419,11 +533,23 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
             }
             case "/permissions" -> {
                 if (active != null || readingSession) { status.setText("Измените режим после завершения запроса."); return; }
-                if (command.argument().equals("read-only")) access.setSelected(false);
-                else if (command.argument().equals("workspace-write")) access.setSelected(true);
-                else if (!command.argument().isBlank()) { transcript.message("Режим", "Используйте `/permissions read-only` или `/permissions workspace-write`."); return; }
-                sessions.writeAccess = access.isSelected(); updateAccessLabel();
-                transcript.message("Режим", sessions.writeAccess ? "Изменение файлов проекта разрешено со следующего запроса." : "Только чтение со следующего запроса.");
+                if (command.argument().equals("auto")) {
+                    sessions.interactiveApprovals = true; sessions.unrestrictedAccess = false; sessions.writeAccess = true;
+                } else if (command.argument().equals("read-only")) {
+                    sessions.interactiveApprovals = false;
+                    sessions.unrestrictedAccess = false; sessions.writeAccess = false;
+                } else if (command.argument().equals("workspace-write")) {
+                    sessions.interactiveApprovals = false;
+                    sessions.unrestrictedAccess = false; sessions.writeAccess = true;
+                } else if (command.argument().equals("danger-full-access")) {
+                    if (!confirmUnrestrictedAccess()) { transcript.message("Режим", "Режим без ограничений не включён."); return; }
+                    sessions.interactiveApprovals = false; sessions.unrestrictedAccess = true; sessions.writeAccess = true;
+                } else if (!command.argument().isBlank()) {
+                    transcript.message("Режим", "Используйте `/permissions read-only`, `/permissions workspace-write` или `/permissions danger-full-access`."); return;
+                }
+                updateAccessLabel();
+                transcript.message("Режим", sessions.unrestrictedAccess ? "Sandbox отключён со следующего запроса: разрешены сеть и полный доступ к файлам."
+                        : sessions.writeAccess ? "Изменение файлов проекта разрешено со следующего запроса." : "Только чтение со следующего запроса.");
             }
             case "/status" -> showStatus();
             case "/model" -> {
@@ -442,8 +568,8 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         var target = session; long generation = sessionLoad;
         if (choose) status.setText("Загружаю модели Codex…");
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
-            try (var client = new CodexSessionClient(binary, root)) {
-                var catalog = CodexModels.list(client);
+            try {
+                var catalog = project.getService(org.agty.aiassistant.execution.ChatExecutionService.class).connections().models(binary, root);
                 ApplicationManager.getApplication().invokeLater(() -> {
                     modelsLoading = false;
                     if (disposed || project.isDisposed() || !binary.equals(CodexSettings.getInstance().getExecutablePath())) return;
@@ -488,12 +614,12 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         statusLoading = true; status.setText("Читаю статус Codex…");
         var target = session;
         String selectedModel = target.selectedModel, selectedEffort = target.reasoningEffort;
-        boolean writeAccess = sessions.writeAccess;
+        boolean writeAccess = sessions.writeAccess, unrestrictedAccess = sessions.unrestrictedAccess, interactive = sessions.interactiveApprovals;
         String binary = CodexSettings.getInstance().getExecutablePath(); Path root = Path.of(project.getBasePath());
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
             String result;
-            try { result = CodexStatus.read(binary, root, target.remoteId(), selectedModel,
-                    selectedEffort, writeAccess); }
+            try { result = project.getService(org.agty.aiassistant.execution.ChatExecutionService.class).connections()
+                    .status(binary, root, target.remoteId(), selectedModel, selectedEffort, writeAccess, unrestrictedAccess, interactive); }
             catch (Exception e) { result = "Статус Codex недоступен: " + e.getMessage(); }
             String output = result;
             ApplicationManager.getApplication().invokeLater(() -> {
@@ -520,6 +646,10 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         String title = session.title.length() > 44 ? session.title.substring(0, 44) + "…" : session.title;
         sessionLabel.setText(title + " · " + uid.substring(0, Math.min(8, uid.length())));
         sessionLabel.setToolTipText(session.title + " · " + session.providerId + " · " + uid);
+        sessionMenuButton.setText(title + " ▾"); sessionMenuButton.setToolTipText(sessionLabel.getToolTipText());
+        String accessLabel = sessions.unrestrictedAccess ? "Полный доступ" : sessions.interactiveApprovals && sessions.writeAccess ? "Auto" : sessions.writeAccess ? "Запись проекта" : "Чтение";
+        requestOptionsButton.setText((session.selectedModel.isBlank() ? "Модель" : session.selectedModel)
+                + " · " + session.reasoningEffort + " · " + accessLabel + " ▾");
     }
     private void applyAppearance() {
         var d = ChatAppearance.getInstance().getState();
@@ -534,8 +664,8 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         String binary = CodexSettings.getInstance().getExecutablePath();
         Path root = Path.of(project.getBasePath());
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
-            try (var client = new CodexSessionClient(binary, root)) {
-                var available = client.list(root);
+            try {
+                var available = project.getService(org.agty.aiassistant.execution.ChatExecutionService.class).connections().sessions(binary, root);
                 ApplicationManager.getApplication().invokeLater(() -> {
                     if (disposed || project.isDisposed()) return;
                     for (var found : available) {
@@ -553,7 +683,10 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         });
     }
     private void readCodexSession(String id) {
-        if (project.getBasePath() == null || disposed || active != null) return;
+        var running = sessions.sessions.stream().filter(candidate -> candidate.remoteId().equals(id)
+                && taskRunner.task(candidate.id) != null && taskRunner.task(candidate.id).active()).findFirst();
+        if (running.isPresent()) { selectSession(running.get()); return; }
+        if (project.getBasePath() == null || disposed) return;
         try { UUID.fromString(id); }
         catch (IllegalArgumentException e) { status.setText("UID должен быть UUID сессии Codex."); return; }
         long generation = ++sessionLoad;
@@ -561,14 +694,17 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         String binary = CodexSettings.getInstance().getExecutablePath();
         Path root = Path.of(project.getBasePath());
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
-            try (var client = new CodexSessionClient(binary, root)) {
-                var found = client.read(id, root);
+            try {
+                var found = project.getService(org.agty.aiassistant.execution.ChatExecutionService.class).connections().read(binary, root, id);
                 ApplicationManager.getApplication().invokeLater(() -> {
                     if (disposed || project.isDisposed() || generation != sessionLoad) return;
                     saveSession();
                     var selected = sessions.sessions.stream().filter(s -> s.providerId.equals("codex") && s.remoteId().equals(id)).findFirst().orElse(null);
                     if (selected == null) { selected = found; sessions.sessions.add(selected); }
-                    else if (!found.messages.isEmpty()) selected.messages = found.messages;
+                    else if (!found.messages.isEmpty() && (taskRunner.task(selected.id) == null || !taskRunner.task(selected.id).active()))
+                        selected.messages = found.messages;
+                    selected.historyCursor = found.historyCursor;
+                    active = null; elapsedTimer.stop();
                     session = selected; session.closed = false; sessions.selected = session.id;
                     historyPosition = -1; historyDraft = "";
                     sessions.providerSelections.put(session.providerId, session.id);
@@ -584,13 +720,44 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         });
     }
 
+    private void loadOlderHistory() {
+        if (project.getBasePath() == null || session.historyCursor.isBlank()) return;
+        var target = session; String cursor = target.historyCursor;
+        olderHistoryButton.setEnabled(false);
+        ApplicationManager.getApplication().executeOnPooledThread(() -> {
+            try {
+                var page = project.getService(org.agty.aiassistant.execution.ChatExecutionService.class).connections()
+                        .historyPage(CodexSettings.getInstance().getExecutablePath(), Path.of(project.getBasePath()), target.remoteId(), cursor);
+                ApplicationManager.getApplication().invokeLater(() -> {
+                    if (disposed || project.isDisposed()) return;
+                    var existing = target.messages.stream().map(m -> m.id).collect(java.util.stream.Collectors.toSet());
+                    var merged = new java.util.ArrayList<ChatSessions.Message>();
+                    for (var message : page.messages()) if (existing.add(message.id)) merged.add(message);
+                    merged.addAll(target.messages); target.messages = merged; target.historyCursor = page.nextCursor();
+                    olderHistoryButton.setEnabled(true);
+                    if (target == session) {
+                        loadingSession = true; transcript.synchronize(target.messages); loadingSession = false;
+                        olderHistoryButton.setVisible(!target.historyCursor.isBlank());
+                    }
+                });
+            } catch (Exception ex) {
+                ApplicationManager.getApplication().invokeLater(() -> { if (!disposed) { olderHistoryButton.setEnabled(true); status.setText(ex.getMessage()); } });
+            }
+        });
+    }
+    public void selectSessionById(String id) {
+        sessions.sessions.stream().filter(candidate -> candidate.id.equals(id)).findFirst().ifPresent(this::selectSession);
+    }
     private void selectSession(ChatSessions.Session selected) {
-        sessionLoad++; readingSession = false; cancel(); saveSession();
+        sessionLoad++; readingSession = false; saveSession();
+        active = null; elapsedTimer.stop();
         session = selected; sessions.selected = session.id;
         historyPosition = -1; historyDraft = "";
         sessions.providerSelections.put(session.providerId, session.id);
         refreshSessions(); loadSession(); busy(false);
-        if (nativeSessions && session.providerId.equals("codex") && !session.remoteId().isEmpty()) readCodexSession(session.remoteId());
+        var selectedTask = taskRunner.task(session.id);
+        if (selectedTask != null) showTask(selectedTask);
+        if (selectedTask == null && nativeSessions && session.providerId.equals("codex") && !session.remoteId().isEmpty()) readCodexSession(session.remoteId());
     }
     JPopupMenu sessionMenu() {
         JPopupMenu menu = new JPopupMenu();
@@ -609,7 +776,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         close.addActionListener(e -> finishSession()); menu.add(close); menu.addSeparator();
         ButtonGroup group = new ButtonGroup();
         for (var item : sessions.sessions) {
-            JRadioButtonMenuItem entry = new JRadioButtonMenuItem((item.closed ? "Завершена · " : "") + item.title + " · " + item.providerId + " · "
+            JRadioButtonMenuItem entry = new JRadioButtonMenuItem((taskRunner.task(item.id) != null && taskRunner.task(item.id).active() ? taskRunner.task(item.id).status + " · " : item.closed ? "Завершена · " : "") + item.title + " · " + item.providerId + " · "
                     + (item.remoteId().isEmpty() ? item.id : item.remoteId()), item == session);
             entry.putClientProperty("html.disable", true);
             entry.setActionCommand(item.id); entry.addActionListener(e -> { item.closed = false; selectSession(item); });
@@ -687,9 +854,11 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         }
         session.history = history.toString();
         session.draft = input.getText();
-        session.messages = transcript.snapshot();
+        if (taskRunner.task(session.id) == null || !taskRunner.task(session.id).active()) session.messages = transcript.snapshot();
     }
     private void loadSession() {
+        olderHistoryButton.setVisible(!session.historyCursor.isBlank());
+        pendingRequestButton.setVisible(false);
         loadingSession = true;
         history.setLength(0); history.append(session.history);
         transcript.restore(session.messages);
@@ -699,6 +868,8 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         saveSession();
         showUid();
         status.setText("Готово");
+        var task = taskRunner.task(session.id);
+        if (task != null) showTask(task);
     }
 
     private void welcome() {
@@ -709,12 +880,40 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
 
     private void send() {
         if (disposed || project.isDisposed()) return;
+        if (commandSuggestions.isVisible() && commandIndex >= 0 && commandIndex < commandSuggestions.getComponentCount()
+                && commandSuggestions.getComponent(commandIndex) instanceof JMenuItem item) {
+            item.doClick(); return;
+        }
         String question = input.getText();
         String commandText = question.trim();
         var command = SlashCommands.parse(commandText);
-        if (command != null) { rememberPrompt(question); input.setText(""); commandSuggestions.setVisible(false); executeCommand(command); return; }
+        if (command != null) {
+            if (SlashCommands.available(session.providerId).stream().noneMatch(c -> c.name().equals(command.name()))) {
+                transcript.message("Команда", "Команда не поддерживается. Введите /help; черновик сохранён.");
+                status.setText("Неизвестная команда. Введите /help; черновик сохранён."); return;
+            }
+            rememberPrompt(question); input.setText(""); hideCommands(); executeCommand(command); return;
+        }
         if (readingSession || active != null) return;
         sendQuestion(commandText.startsWith("//") ? commandText.substring(1) : question);
+    }
+
+    public void submitEditorAction(String question, CollectedContext context) {
+        if (disposed || project.isDisposed()) return;
+        if (context == null || context.items().isEmpty()) {
+            status.setText(context == null || context.notes().isEmpty() ? "Контекст редактора не найден." : context.notes().getFirst());
+            return;
+        }
+        pinnedContext.clear();
+        pinnedContext.addAll(context.items());
+        includeContext.setSelected(true);
+        updateContextLabel();
+        input.setText(question);
+        if (readingSession || active != null) {
+            status.setText("Запрос из редактора подготовлен; отправьте после завершения текущей операции.");
+            return;
+        }
+        send();
     }
     private void sendQuestion(String question) {
         if (question.isBlank()) return;
@@ -738,13 +937,18 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         try {
             var choice = selectedProvider();
             if (choice == null) throw new IllegalStateException("LLM этой сессии недоступна. Выберите подключение.");
-            provider = choice.factory().get();
+            provider = nativeSessions && choice.id().equals("codex")
+                    ? new org.agty.aiassistant.core.CodexChatProvider(CodexSettings.getInstance().getExecutablePath(),
+                        project.getService(org.agty.aiassistant.execution.ChatExecutionService.class).connections())
+                    : choice.factory().get();
         }
         catch (RuntimeException e) { status.setText(e.getMessage()); return; }
         final boolean writeAccess = sessions.writeAccess;
+        final boolean unrestrictedAccess = sessions.unrestrictedAccess;
         CollectedContext requestContext = requestContext(rootPath, policy);
         String prompt = "You are assisting inside IntelliJ IDEA. Answer in the user's language. "
-                + (writeAccess ? "Current access mode permits modifying files within the project directory to complete the user request. "
+                + (unrestrictedAccess ? "Current access mode is unrestricted: network access and filesystem access outside the project are permitted. "
+                    : writeAccess ? "Current access mode permits modifying files within the project directory to complete the user request. "
                     : "Current access mode is read-only. Do not modify files. ")
                 + "Propose code in Markdown fenced blocks with language tags. "
                 + "Link source locations using [method or file](relative/path/File.java#L42), with real line numbers. "
@@ -753,9 +957,12 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
                 + requestContext.promptBlock()
                 + (session.remoteId().isEmpty() ? history : "") + "\nUSER:\n" + question;
         final ChatProvider.Request run;
-        boolean forkForModel = session.providerId.equals("codex") && !session.remoteId().isEmpty()
-                && (!session.remoteId().equals(session.confirmedThreadId) || !session.selectedModel.equals(session.effectiveModel));
-        try { run = provider.newRequest(session.remoteId(), writeAccess, session.selectedModel, session.reasoningEffort, forkForModel); }
+        try { run = provider.newRequest(new org.agty.aiassistant.chat.RequestOptions(rootPath, session.remoteId(),
+                session.selectedModel, session.reasoningEffort,
+                unrestrictedAccess ? org.agty.aiassistant.chat.RequestOptions.Access.FULL
+                        : writeAccess ? org.agty.aiassistant.chat.RequestOptions.Access.WORKSPACE_WRITE
+                        : org.agty.aiassistant.chat.RequestOptions.Access.READ_ONLY,
+                org.agty.aiassistant.chat.RequestOptions.Mode.WORK, java.util.List.of(), false, sessions.interactiveApprovals)); }
         catch (RuntimeException e) { status.setText(e.getMessage()); return; }
         rememberPrompt(question);
         String requestId = UUID.randomUUID().toString();
@@ -772,74 +979,32 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
             if (session.title.length() > 60) session.title = session.title.substring(0, 60) + "…";
             showUid();
         }
-        transcript.message("Вы", question);
-        input.setText("");
+        saveSession();
+        try {
+            taskRunner.start(session, run, rootPath, prompt, question, provider.name(), writeAccess || unrestrictedAccess);
+            input.setText("");
+        } catch (Exception e) { active = null; busy(false); status.setText(e.getMessage()); }
+    }
 
-        ApplicationManager.getApplication().executeOnPooledThread(() -> {
-            LinkedHashMap<String, String> answers = new LinkedHashMap<>();
-            String outcome;
-            boolean success = false;
-            try {
-                policy.request(writeAccess).requireAllowed();
-                run.run(rootPath, prompt, event -> {
-                    switch (event.kind()) {
-                        case MODEL -> ui(run, () -> {
-                            session.effectiveModel = event.text();
-                            session.confirmedThreadId = session.selectedModel.equals(event.text()) ? session.remoteId() : "";
-                            refreshSessions(); saveSession();
-                        });
-                        case USAGE -> ui(run, () -> session.tokenUsage = event.text());
-                        case SESSION -> ui(run, () -> {
-                            if (event.text().isBlank()) return;
-                            if (session.providerId.equals("codex")) {
-                                try { UUID.fromString(event.text()); }
-                                catch (IllegalArgumentException ex) { status.setText("Codex вернул некорректный UID"); return; }
-                            }
-                            session.nativeSessionId = event.text(); history.setLength(0); showUid(); saveSession();
-                        });
-                        case MESSAGE -> {
-                            if (event.complete()) {
-                                answers.put(event.id().isEmpty() ? UUID.randomUUID().toString() : event.id(), event.text());
-                                if (answers.values().stream().mapToInt(String::length).sum() > MAX_DISPLAY)
-                                    throw new IllegalStateException("Ответ превысил лимит 500 000 символов.");
-                            }
-                            ui(run, () -> {
-                                stage = "Получает ответ";
-                                transcript.event(requestId, provider.name(), event);
-                            });
-                        }
-                        case ACTIVITY -> ui(run, () -> {
-                            stage = event.complete() ? "Ожидание следующего шага" : event.title();
-                            status.setText(stage);
-                            transcript.event(requestId, provider.name(), event);
-                        });
-                        case STATUS -> ui(run, () -> { stage = event.text(); status.setText(stage); });
-                        case ERROR -> ui(run, () -> transcript.message("Ошибка", event.text()));
-                        default -> { }
-                    }
-                });
-                success = !answers.isEmpty();
-                outcome = success ? "Готово" : "Провайдер завершил запрос без текстового ответа.";
-            } catch (CancellationException e) { outcome = "Запрос остановлен."; }
-            catch (Exception e) { outcome = "Ошибка: " + e.getMessage(); }
-            String finalOutcome = outcome;
-            boolean finalSuccess = success;
-            ui(run, () -> {
-                transcript.finishRequest(requestId, finalSuccess);
-                if (finalSuccess && session.remoteId().isEmpty()) history.append("USER:\n").append(question)
-                        .append("\nASSISTANT:\n").append(String.join("\n", answers.values())).append('\n');
-                else if (!finalSuccess) {
-                    transcript.message("Запрос не завершён", finalOutcome);
-                    if (input.getText().isBlank()) input.setText(question);
-                }
-                elapsedTimer.stop();
-                status.setText(finalSuccess ? (writeAccess ? "Готово · изменения проекта разрешены" : "Готово · только чтение") : "Запрос не завершён");
-                if (writeAccess) com.intellij.openapi.vfs.VirtualFileManager.getInstance().asyncRefresh(null);
-                active = null;
-                pendingQuestion = "";
-                busy(false);
-            });
-        });
+    private void showTask(org.agty.aiassistant.execution.TaskRunner.Task task) {
+        loadingSession = true;
+        pendingRequestButton.setVisible(!task.pending.isEmpty());
+        pendingRequestButton.setText("Требуется ответ (" + task.pending.size() + ")");
+        transcript.synchronize(task.session.messages);
+        history.setLength(0); history.append(task.session.history);
+        active = task.active() ? task.request : null;
+        activeRequestId = task.id; pendingQuestion = task.question;
+        startedAt = task.startedAt; stage = task.status;
+        showUid(); refreshSessions();
+        loadingSession = false;
+        busy(task.active()); status.setText(task.status);
+        if (task.active()) elapsedTimer.start();
+        else {
+            elapsedTimer.stop();
+            suggestedDiff = extractUnifiedDiff(String.join("\n", task.session.messages.stream()
+                    .filter(m -> m.id.startsWith(task.id + ":") && !m.activity).map(m -> m.markdown).toList()));
+            com.intellij.openapi.vfs.VirtualFileManager.getInstance().asyncRefresh(null);
+        }
     }
 
     private void showContextPreview() {
@@ -945,6 +1110,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
     private void showDiffReviewDialog() {
         if (project.getBasePath() == null) { status.setText("Откройте локальный проект."); return; }
         JTextArea input = new JTextArea(24, 92);
+        input.setText(suggestedDiff);
         input.setLineWrap(false);
         JScrollPane inputScroll = new JScrollPane(input);
         inputScroll.setPreferredSize(JBUI.size(820, 460));
@@ -969,8 +1135,13 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         }
         ChangeSet changeSet = ChangeSet.fromUnifiedDiff(diff, originals);
         java.util.List<String> conflicts = changeSet.conflicts(originals);
+        java.util.Set<Integer> selectedHunks;
+        try { selectedHunks = selectHunks(changeSet); }
+        catch (IllegalArgumentException e) { status.setText(e.getMessage()); return; }
+        if (selectedHunks == null) return;
         String preview = changeSet.preview() + (conflicts.isEmpty() ? "\n\nКонфликтов не найдено."
                 : "\n\nКонфликты:\n- " + String.join("\n- ", conflicts));
+        if (!selectedHunks.isEmpty()) preview = changeSet.preview(selectedHunks) + "\n\nВыбраны отдельные фрагменты: " + selectedHunks.size();
         JTextArea area = new JTextArea(preview, 26, 100);
         area.setEditable(false);
         area.setLineWrap(false);
@@ -979,13 +1150,39 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         int answer = JOptionPane.showConfirmDialog(this, scroll, "Diff review", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
         if (answer != JOptionPane.OK_OPTION) return;
         if (!conflicts.isEmpty()) { status.setText("Diff не применён: есть конфликты."); return; }
-        applyChangeSet(root, policy, changeSet);
+        applyChangeSet(root, policy, changeSet, selectedHunks);
     }
 
-    private void applyChangeSet(Path root, ProjectAccessPolicy policy, ChangeSet changeSet) {
+    private java.util.Set<Integer> selectHunks(ChangeSet changeSet) {
+        java.util.List<ChangeSet.Hunk> hunks = changeSet.hunks();
+        if (hunks.size() <= 1) return java.util.Set.of();
+        StringBuilder prompt = new StringBuilder("Фрагменты diff:\n");
+        for (int i = 0; i < hunks.size(); i++) {
+            ChangeSet.Hunk hunk = hunks.get(i);
+            prompt.append(i + 1).append(". ").append(hunk.path()).append(" @ +").append(hunk.newStart()).append('\n');
+        }
+        prompt.append("\nВведите номера через запятую или оставьте пустым, чтобы принять все:");
+        String value = Messages.showInputDialog(project, prompt.toString(), "Выбор фрагментов", null);
+        if (value == null) return null;
+        if (value.isBlank()) return java.util.Set.of();
+        java.util.Set<Integer> selected = new java.util.LinkedHashSet<>();
+        for (String part : value.split(",")) {
+            int index;
+            try { index = Integer.parseInt(part.strip()); }
+            catch (NumberFormatException e) { throw new IllegalArgumentException("Некорректный номер фрагмента: " + part); }
+            if (index < 1 || index > hunks.size()) throw new IllegalArgumentException("Нет фрагмента #" + index);
+            selected.add(hunks.get(index - 1).id());
+        }
+        return java.util.Set.copyOf(selected);
+    }
+
+    private void applyChangeSet(Path root, ProjectAccessPolicy policy, ChangeSet changeSet, java.util.Set<Integer> selectedHunks) {
         try {
+            java.util.Map<String, String> backup = new java.util.LinkedHashMap<>();
+            int[] appliedFiles = {0};
             CommandProcessor.getInstance().executeCommand(project, () -> ApplicationManager.getApplication().runWriteAction(() -> {
                 for (ChangeSet.FileChange file : changeSet.files()) {
+                    if (!selectedHunks.isEmpty() && file.hunks().stream().noneMatch(hunk -> selectedHunks.contains(hunk.id()))) continue;
                     Path path = root.resolve(file.path()).normalize();
                     ProjectAccessPolicy.Verdict verdict = policy.path(path, true);
                     verdict.requireAllowed();
@@ -993,17 +1190,26 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
                     try { current = Files.exists(path) ? Files.readString(path) : ""; }
                     catch (Exception e) { throw new IllegalStateException("Не удалось прочитать " + file.path(), e); }
                     if (file.conflictsWith(current)) throw new IllegalStateException("Файл изменился после review: " + file.path());
-                    writeFile(path, file.afterText());
+                    backup.put(file.path(), current);
+                    Document document = writeFile(path, file.afterText(selectedHunks));
+                    if (document != null) {
+                        formatChangedRanges(document, file, selectedHunks);
+                        FileDocumentManager.getInstance().saveDocument(document);
+                    }
+                    appliedFiles[0]++;
                 }
             }), "Apply AI ChangeSet", null);
+            lastReviewBackup = java.util.Map.copyOf(backup);
+            undoReviewButton.setEnabled(!lastReviewBackup.isEmpty());
+            suggestedDiff = "";
             com.intellij.openapi.vfs.VirtualFileManager.getInstance().asyncRefresh(null);
-            status.setText("ChangeSet применён: файлов " + changeSet.files().size());
+            status.setText("ChangeSet применён: файлов " + appliedFiles[0]);
         } catch (RuntimeException e) {
             status.setText("ChangeSet не применён: " + e.getMessage());
         }
     }
 
-    private void writeFile(Path path, String text) {
+    private Document writeFile(Path path, String text) {
         try {
             Files.createDirectories(path.getParent());
             VirtualFile file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path);
@@ -1012,13 +1218,49 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
                 if (document != null) {
                     document.setText(text);
                     FileDocumentManager.getInstance().saveDocument(document);
-                    return;
+                    return document;
                 }
             }
             Files.writeString(path, text);
+            return null;
         } catch (Exception e) {
             throw new IllegalStateException("Не удалось записать " + path.getFileName(), e);
         }
+    }
+
+    private void formatChangedRanges(Document document, ChangeSet.FileChange file, java.util.Set<Integer> selectedHunks) {
+        if (document.getLineCount() == 0) return;
+        PsiDocumentManager.getInstance(project).commitDocument(document);
+        var psi = PsiDocumentManager.getInstance(project).getPsiFile(document);
+        if (psi == null) return;
+        java.util.List<TextRange> ranges = new java.util.ArrayList<>();
+        for (ChangeSet.Hunk hunk : file.hunks()) {
+            if (selectedHunks != null && !selectedHunks.isEmpty() && !selectedHunks.contains(hunk.id())) continue;
+            int startLine = Math.max(0, hunk.newStart() - 1);
+            int endLine = Math.min(document.getLineCount() - 1, startLine + Math.max(0, hunk.newCount() - 1));
+            int start = document.getLineStartOffset(Math.min(startLine, document.getLineCount() - 1));
+            int end = document.getLineEndOffset(Math.max(startLine, endLine));
+            ranges.add(new TextRange(start, end));
+        }
+        if (!ranges.isEmpty()) CodeStyleManager.getInstance(project).reformatText(psi, ranges);
+    }
+
+    private void undoLastReview() {
+        if (project.getBasePath() == null || lastReviewBackup.isEmpty()) return;
+        Path root = Path.of(project.getBasePath());
+        java.util.Map<String, String> backup = lastReviewBackup;
+        CommandProcessor.getInstance().executeCommand(project, () -> ApplicationManager.getApplication().runWriteAction(() -> {
+            for (var entry : backup.entrySet()) writeFile(root.resolve(entry.getKey()).normalize(), entry.getValue());
+        }), "Undo AI ChangeSet", null);
+        lastReviewBackup = java.util.Map.of();
+        undoReviewButton.setEnabled(false);
+        status.setText("Последний ChangeSet откачен.");
+    }
+
+    private static String extractUnifiedDiff(String text) {
+        int start = text.indexOf("diff --git ");
+        if (start < 0) return "";
+        return text.substring(start).replace("```", "").strip();
     }
 
     private CollectedContext requestContext(Path root, ProjectAccessPolicy policy) {
@@ -1048,30 +1290,21 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
     }
 
     private void cancel() {
-        if (active != null) {
-            ChatProvider.Request run = active;
-            active = null;
-            ApplicationManager.getApplication().executeOnPooledThread(run::cancel);
-            transcript.finishRequest(activeRequestId, false);
-            transcript.message("Остановлено", session.remoteId().isEmpty() ? "Частичный ответ не добавлен в контекст."
-                    : "Запрос остановлен. Уже записанная история остаётся у провайдера.");
-            elapsedTimer.stop();
-            if (input.getText().isBlank()) input.setText(pendingQuestion);
-            pendingQuestion = "";
-            status.setText("Остановлено");
-            busy(false);
-        }
+        taskRunner.cancel(session.id);
+        status.setText("Остановка…");
     }
 
     private void busy(boolean value) {
-        access.setEnabled(!value && !readingSession);
+        access.setEnabled(!value && !readingSession && !sessions.unrestrictedAccess);
+        unrestricted.setEnabled(!value && !readingSession);
         includeContext.setEnabled(!value && !readingSession);
         addContextButton.setEnabled(!value && !readingSession);
         contextButton.setEnabled(!value && !readingSession);
         clearContextButton.setEnabled(!value && !readingSession && !pinnedContext.isEmpty());
         reviewButton.setEnabled(!value && !readingSession);
+        undoReviewButton.setEnabled(!value && !readingSession && !lastReviewBackup.isEmpty());
         progress.setVisible(value);
-        send.setEnabled(!value && !readingSession);
+        send.setEnabled(!value && !readingSession); send.setVisible(!value);
         refresh.setEnabled(!value);
         openUid.setEnabled(!value);
         input.setEditable(true);
@@ -1090,17 +1323,12 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
     @Override public void dispose() {
         sessionLoad++;
         ChatAppearance.getInstance().removeListener(appearanceListener);
-        cancel();
+        try { taskSubscription.close(); } catch (Exception ignored) { }
         saveSession();
-        commandSuggestions.setVisible(false);
+        hideCommands();
         disposed = true;
         elapsedTimer.stop();
         transcript.dispose();
-        if (active != null) {
-            ChatProvider.Request run = active;
-            active = null;
-            ApplicationManager.getApplication().executeOnPooledThread(run::cancel);
-        }
         history.setLength(0);
     }
 }

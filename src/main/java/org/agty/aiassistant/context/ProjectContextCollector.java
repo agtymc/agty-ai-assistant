@@ -25,7 +25,12 @@ public final class ProjectContextCollector {
 
     public static CollectedContext currentEditor(Project project, Path root, ProjectAccessPolicy policy) {
         return ApplicationManager.getApplication().runReadAction(
-                (com.intellij.openapi.util.Computable<CollectedContext>) () -> collect(project, root, policy));
+                (com.intellij.openapi.util.Computable<CollectedContext>) () -> collect(project, root, policy, FileEditorManager.getInstance(project).getSelectedTextEditor()));
+    }
+
+    public static CollectedContext editor(Project project, Path root, ProjectAccessPolicy policy, Editor editor) {
+        return ApplicationManager.getApplication().runReadAction(
+                (com.intellij.openapi.util.Computable<CollectedContext>) () -> collect(project, root, policy, editor));
     }
 
     public static CollectedContext files(Path root, ProjectAccessPolicy policy, List<VirtualFile> files) {
@@ -70,10 +75,9 @@ public final class ProjectContextCollector {
         return new CollectedContext(List.copyOf(items), List.copyOf(notes));
     }
 
-    private static CollectedContext collect(Project project, Path root, ProjectAccessPolicy policy) {
+    private static CollectedContext collect(Project project, Path root, ProjectAccessPolicy policy, Editor editor) {
         List<ContextItem> items = new ArrayList<>();
         List<String> notes = new ArrayList<>();
-        Editor editor = FileEditorManager.getInstance(project).getSelectedTextEditor();
         if (editor == null) {
             notes.add("Нет активного текстового редактора.");
             return new CollectedContext(List.copyOf(items), List.copyOf(notes));

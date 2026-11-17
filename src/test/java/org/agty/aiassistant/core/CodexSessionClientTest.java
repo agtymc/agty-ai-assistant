@@ -5,7 +5,36 @@ import org.agty.aiassistant.chat.ChatEvent;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
+@org.junit.jupiter.api.Timeout(10)
 class CodexSessionClientTest {
+    private CodexSessionClient connection() throws Exception {
+        return new CodexSessionClient(java.util.List.of(
+                java.nio.file.Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-cp", System.getProperty("fixture.classes"), RpcFixture.class.getName(), "rpc"),
+                java.nio.file.Path.of("."), () -> false);
+    }
+    @Test void routesOutOfOrderRepliesAndPreservesNotifications() throws Exception {
+        try (var client = connection(); var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var first = executor.submit(() -> client.call("fixture/first", new com.google.gson.JsonObject()));
+            var second = executor.submit(() -> client.call("fixture/second", new com.google.gson.JsonObject()));
+            assertEquals(2, second.get().get("value").getAsInt());
+            assertEquals(1, first.get().get("value").getAsInt());
+            assertEquals("fixture/event", client.nextNotification().get("method").getAsString());
+        }
+    }
+    @Test void disconnectFailsPendingCallPromptly() throws Exception {
+        try (var client = connection()) {
+            assertThrows(java.io.IOException.class,
+                    () -> client.call("fixture/crash", new com.google.gson.JsonObject()));
+        }
+    }
+    @Test void closedConnectionRejectsNewCalls() throws Exception {
+        var client = connection();
+        client.close();
+        assertThrows(java.io.IOException.class,
+                () -> client.call("fixture/first", new com.google.gson.JsonObject()));
+    }
+
     @Test void importsPublicMessagesAndKeepsNativeUid() {
         var thread = JsonParser.parseString("""
             {"id":"019e309f-5fe7-7a93-90d0-ce794686cdfd","name":"My session","turns":[{"items":[

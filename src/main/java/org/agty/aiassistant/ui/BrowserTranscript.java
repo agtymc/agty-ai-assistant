@@ -13,7 +13,7 @@ import java.util.function.Consumer;
 /** Local document only: no remote scripts, images, frames or network connections. */
 final class BrowserTranscript implements Disposable {
     private final JBCefBrowser browser = new JBCefBrowser();
-    private final JBCefJSQuery actions = JBCefJSQuery.create(browser);
+    private final JBCefJSQuery actions = JBCefJSQuery.create((JBCefBrowserBase) browser);
     private String latest = "";
     private boolean follow = true, resetScroll;
     private volatile boolean ready, disposed;
@@ -42,8 +42,18 @@ final class BrowserTranscript implements Disposable {
         if (!ready || disposed || latest.isEmpty()) return;
         String script = "(()=>{const root=document.scrollingElement;const old=root.scrollTop;const bottom=root.scrollHeight-old-innerHeight<60;"
                 + "const doc=new DOMParser().parseFromString(" + new Gson().toJson(latest) + ",'text/html');"
-                + "document.getElementById('chat-style').textContent=doc.querySelector('style').textContent;"
-                + "document.getElementById('chat').innerHTML=doc.body.innerHTML;"
+                + "const style=document.getElementById('chat-style');const css=doc.querySelector('style').textContent;if(style.textContent!==css)style.textContent=css;"
+                + "const chat=document.getElementById('chat');const existing=new Map([...chat.children].map(n=>[n.dataset.entryId,n]));"
+                + "const selected=n=>{const s=getSelection();return s&&!s.isCollapsed&&s.rangeCount&&n.contains(s.getRangeAt(0).commonAncestorContainer);};"
+                + "window.agtyDeferred=window.agtyDeferred||new Map();let cursor=chat.firstElementChild;"
+                + "for(const fresh of doc.body.children){const id=fresh.dataset.entryId;let node=existing.get(id);existing.delete(id);"
+                + "if(!node){node=document.importNode(fresh,true);}else if(node.outerHTML!==fresh.outerHTML){"
+                + "if(selected(node)){window.agtyDeferred.set(id,fresh.outerHTML);}else{node.innerHTML=fresh.innerHTML;node.className=fresh.className;window.agtyDeferred.delete(id);}}else{window.agtyDeferred.delete(id);}"
+                + "if(node!==cursor)chat.insertBefore(node,cursor);cursor=node.nextElementSibling;}"
+                + "for(const [id,node] of existing){if(selected(node))window.agtyDeferred.set(id,null);else node.remove();}"
+                + "if(!window.agtySelectionListener){window.agtySelectionListener=true;document.addEventListener('selectionchange',()=>{"
+                + "if(!getSelection().isCollapsed)return;for(const [id,html] of window.agtyDeferred){const node=[...chat.children].find(n=>n.dataset.entryId===id);"
+                + "if(node){if(html===null)node.remove();else{const box=document.createElement('div');box.innerHTML=html;node.replaceWith(box.firstElementChild);}}}window.agtyDeferred.clear();});}"
                 + "root.scrollTop=" + (resetScroll ? "root.scrollHeight" : "(" + follow + "&&bottom)?root.scrollHeight:old") + ";})();";
         resetScroll = false;
         browser.getCefBrowser().executeJavaScript(script, browser.getCefBrowser().getURL(), 0);

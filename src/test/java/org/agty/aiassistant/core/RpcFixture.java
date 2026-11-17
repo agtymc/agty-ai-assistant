@@ -10,6 +10,10 @@ public final class RpcFixture {
     private static final String THREAD = "019e309f-5fe7-7a93-90d0-ce794686cdfd";
     private static final String FORK = "019e309f-5fe7-7a93-90d0-ce794686cdfa";
     private static String currentThread = THREAD;
+    private static String heldId;
+    private static String secondId;
+    private static int threadSequence;
+    private static final java.util.Set<String> interrupted = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private static void emit(String value) { System.out.println(value); System.out.flush(); }
     private static void event(String method, String fields) {
         emit("{\"method\":\"" + method + "\",\"params\":{\"threadId\":\"" + currentThread + "\"," + fields + "}}");
@@ -23,6 +27,45 @@ public final class RpcFixture {
                 if (!match.find()) continue;
                 String id = match.group(1);
                 if (line.contains("\"initialize\"")) emit("{\"id\":" + id + ",\"result\":{}}");
+                else if (mode.equals("multiplex") && line.contains("\"thread/start\"")) {
+                    String thread = threadSequence++ == 0 ? THREAD : FORK;
+                    emit("{\"id\":" + id + ",\"result\":{\"model\":\"fixture\",\"thread\":{\"id\":\"" + thread + "\"}}}");
+                } else if (mode.equals("multiplex") && (line.contains("\"turn/start\"") || line.contains("\"turn/interrupt\""))) {
+                    var threadMatch = Pattern.compile("\"threadId\":\"([^\"]+)\"").matcher(line);
+                    if (!threadMatch.find()) System.exit(21);
+                    String thread = threadMatch.group(1), turn = "turn-" + thread;
+                    if (line.contains("turn/interrupt")) {
+                        interrupted.add(thread); emit("{\"id\":" + id + ",\"result\":{}}");
+                    } else {
+                        emit("{\"id\":" + id + ",\"result\":{\"turn\":{\"id\":\"" + turn + "\"}}}");
+                        Thread.startVirtualThread(() -> {
+                            emit("{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"" + thread
+                                    + "\",\"turnId\":\"" + turn + "\",\"itemId\":\"same-id\",\"delta\":\"" + thread + "\"}}");
+                            try { Thread.sleep(500); } catch (InterruptedException ignored) { }
+                            if (!interrupted.contains(thread)) {
+                                emit("{\"method\":\"item/completed\",\"params\":{\"threadId\":\"" + thread
+                                        + "\",\"turnId\":\"" + turn + "\",\"item\":{\"id\":\"same-id\",\"type\":\"agentMessage\",\"text\":\"" + thread + "\"}}}");
+                                emit("{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"" + thread
+                                        + "\",\"turn\":{\"id\":\"" + turn + "\",\"status\":\"completed\"}}}");
+                            }
+                        });
+                    }
+                }
+                else if (mode.equals("interactive") && id.equals("900")) {
+                    if (!line.contains("\"decision\":\"accept\"")) System.exit(20);
+                    event("serverRequest/resolved", "\"requestId\":900");
+                    event("item/completed", "\"turnId\":\"turn-1\",\"item\":{\"id\":\"answer\",\"type\":\"agentMessage\",\"text\":\"Approved\"}");
+                    event("turn/completed", "\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}");
+                }
+                else if (line.contains("\"fixture/first\"") || line.contains("\"fixture/second\"")) {
+                    if (line.contains("fixture/first")) heldId = id; else secondId = id;
+                    if (heldId != null && secondId != null) {
+                        emit("{\"id\":" + secondId + ",\"result\":{\"value\":2}}");
+                        emit("{\"method\":\"fixture/event\",\"params\":{}}");
+                        emit("{\"id\":" + heldId + ",\"result\":{\"value\":1}}");
+                    }
+                }
+                else if (line.contains("\"fixture/crash\"")) { System.exit(7); }
                 else if (line.contains("\"model/list\"")) {
                     if (line.contains("\"cursor\":\"page2\""))
                         emit("{\"id\":" + id + ",\"result\":{\"data\":[{\"id\":\"b\",\"model\":\"engine-b\",\"displayName\":\"Model B\",\"defaultReasoningEffort\":\"high\",\"supportedReasoningEfforts\":[{\"reasoningEffort\":\"high\",\"description\":\"Thorough\"},{\"reasoningEffort\":\"future-level\",\"description\":\"Future\"}]}],\"nextCursor\":null}}");
@@ -34,20 +77,42 @@ public final class RpcFixture {
                 } else if (line.contains("\"thread/start\"") || line.contains("\"thread/resume\"") || line.contains("\"thread/fork\"")) {
                     if (mode.equals("model") && !line.contains("\"model\":\"engine-b\"")) System.exit(10);
                     if (mode.equals("fork") && (!line.contains("\"thread/fork\"") || !line.contains("\"model\":\"engine-b\""))) System.exit(13);
-                    String expected = mode.equals("write") ? "workspace-write" : "read-only";
-                    if (!line.contains("\"sandbox\":\"" + expected + "\"") || !line.contains("\"approvalPolicy\":\"never\"")) System.exit(8);
+                    String expected = mode.equals("full") ? "danger-full-access" : mode.equals("write") ? "workspace-write" : "read-only";
+                    if (!line.contains("\"sandbox\":\"" + expected + "\"") || !line.contains("\"approvalPolicy\":\"" + (mode.equals("interactive") ? "on-request" : "never") + "\"")) System.exit(8);
                     String responseModel = mode.equals("mismatch") ? "engine-a" : mode.equals("no-model") ? "" : mode.equals("model") || mode.equals("rerouted") || mode.equals("fork") ? "engine-b" : "fixture";
                     currentThread = mode.equals("fork") ? FORK : THREAD;
-                    emit("{\"id\":" + id + ",\"result\":{\"model\":\"" + responseModel + "\",\"thread\":{\"id\":\"" + currentThread + "\"}}}");
+                    if (mode.startsWith("reconnect") && line.contains("\"thread/resume\"")) {
+                        String snapshot = mode.equals("reconnect-active")
+                                ? "\"status\":{\"type\":\"active\",\"activeFlags\":[]},\"turns\":[]"
+                                : "\"turns\":[{\"id\":\"turn-1\",\"status\":\"inProgress\",\"items\":[{\"id\":\"answer\",\"type\":\"agentMessage\",\"text\":\"Привет\"}]}]";
+                        emit("{\"id\":" + id + ",\"result\":{\"model\":\"fixture\",\"thread\":{\"id\":\"" + currentThread
+                                + "\"," + snapshot + "}}}");
+                        event("item/completed", "\"turnId\":\"turn-1\",\"item\":{\"id\":\"answer\",\"type\":\"agentMessage\",\"text\":\"Привет после восстановления\"}");
+                        event("turn/completed", "\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}");
+                    } else {
+                        emit("{\"id\":" + id + ",\"result\":{\"model\":\"" + responseModel + "\",\"thread\":{\"id\":\"" + currentThread + "\"}}}");
+                    }
                 } else if (line.contains("\"turn/start\"")) {
+                    Path reconnectMarker = Path.of(".rpc-reconnect-started");
+                    if (mode.startsWith("reconnect") && java.nio.file.Files.exists(reconnectMarker)) System.exit(15);
                     if (mode.equals("fork") && !line.contains("\"threadId\":\"" + FORK + "\"")) System.exit(14);
                     if (mode.equals("model") && !line.contains("\"effort\":\"high\"")) System.exit(12);
                     if (mode.equals("model") && !line.contains("\"model\":\"engine-b\"")) System.exit(11);
-                    String expected = mode.equals("write") ? "workspaceWrite" : "readOnly";
-                    if (!line.contains("\"type\":\"" + expected + "\"") || !line.contains("\"networkAccess\":false")) System.exit(9);
+                    String expected = mode.equals("full") ? "dangerFullAccess" : mode.equals("write") ? "workspaceWrite" : "readOnly";
+                    if (!line.contains("\"type\":\"" + expected + "\"")
+                            || mode.equals("full") == line.contains("\"networkAccess\":false")) System.exit(9);
                     emit("{\"id\":" + id + ",\"result\":{\"turn\":{\"id\":\"turn-1\"}}}");
+                    if (mode.equals("interactive")) {
+                        emit("{\"id\":900,\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"threadId\":\"" + currentThread
+                                + "\",\"turnId\":\"turn-1\",\"itemId\":\"cmd\",\"command\":\"echo test\",\"startedAtMs\":0}}");
+                        continue;
+                    }
                     if (mode.equals("rerouted")) event("model/rerouted", "\"turnId\":\"turn-1\",\"fromModel\":\"engine-b\",\"toModel\":\"engine-a\",\"reason\":\"highRiskCyberActivity\"");
                     event("item/agentMessage/delta", "\"turnId\":\"turn-1\",\"itemId\":\"answer\",\"delta\":\"Привет\"");
+                    if (mode.startsWith("reconnect")) {
+                        java.nio.file.Files.writeString(reconnectMarker, "started");
+                        System.exit(7);
+                    }
                     if (mode.equals("hang")) { Thread.sleep(60_000); return; }
                     if (mode.equals("crash")) System.exit(7);
                     Thread.sleep(150);

@@ -5,10 +5,23 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ChatSessionsTest {
+    @Test void newProjectsUseAutoAndOldAccessSettingsArePreserved() {
+        var fresh = new ChatSessions().project("new");
+        assertTrue(fresh.writeAccess); assertTrue(fresh.interactiveApprovals); assertFalse(fresh.unrestrictedAccess);
+        var old = new ChatSessions.ProjectSessions(); old.writeAccess = false; old.unrestrictedAccess = false;
+        old.create();
+        var data = new ChatSessions.Data(); data.projects.put("old", old);
+        var store = new ChatSessions(); store.loadState(data);
+        assertFalse(store.project("old").writeAccess); assertFalse(store.project("old").interactiveApprovals);
+        old.unrestrictedAccess = true; old.writeAccess = true;
+        assertTrue(store.project("old").unrestrictedAccess); assertFalse(store.project("old").interactiveApprovals);
+    }
+
     @Test void restoresSelectedSessionMessagesContextAndDraftFromXml() {
         ChatSessions store = new ChatSessions();
         var project = store.project("/projects/first");
         project.writeAccess = true;
+        project.unrestrictedAccess = true;
         var first = project.current();
         first.title = "Первый вопрос";
         first.codexId = "019e309f-5fe7-7a93-90d0-ce794686cdfd";
@@ -35,6 +48,7 @@ class ChatSessionsTest {
         restored.loadState(XmlSerializer.deserialize(xml, ChatSessions.Data.class));
         var selected = restored.project("/projects/first").current();
         assertTrue(restored.project("/projects/first").writeAccess);
+        assertTrue(restored.project("/projects/first").unrestrictedAccess);
         assertEquals(first.id, selected.id);
         assertEquals(first.title, selected.title);
         assertEquals(first.codexId, selected.codexId);

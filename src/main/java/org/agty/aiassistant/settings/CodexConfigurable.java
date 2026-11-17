@@ -2,7 +2,7 @@ package org.agty.aiassistant.settings;
 
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
-import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory;
+import com.intellij.openapi.fileChooser.FileChooserDescriptor;
 import com.intellij.openapi.options.Configurable;
 import com.intellij.openapi.options.ConfigurationException;
 import com.intellij.openapi.ui.TextFieldWithBrowseButton;
@@ -26,7 +26,7 @@ public final class CodexConfigurable implements Configurable {
 
     @Override public JComponent createComponent() {
         path = new TextFieldWithBrowseButton();
-        path.addBrowseFolderListener(null, FileChooserDescriptorFactory.createSingleFileDescriptor()
+        path.addBrowseFolderListener(null, new FileChooserDescriptor(true, false, false, false, false, false)
                 .withTitle("Выберите исполняемый файл Codex"));
         check = new JButton("Проверить Codex");
         result = new JLabel("Проверка запускает только codex --version.");

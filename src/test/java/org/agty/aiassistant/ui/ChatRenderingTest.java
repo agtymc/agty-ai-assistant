@@ -13,25 +13,92 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ChatRenderingTest {
+    private static String projectKey() {
+        return org.agty.aiassistant.chat.ProjectIdentity.getInstance(project).stableId(project);
+    }
+    @Test void backgroundTaskSurvivesChatSwitchAndPanelReopen() throws Exception {
+        var directory = java.nio.file.Files.createTempDirectory("agty-background-test");
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var finished = new java.util.concurrent.CountDownLatch(1);
+        var cancellations = new java.util.concurrent.atomic.AtomicInteger();
+        var panelRef = new AtomicReference<AiAssistantChatPanel>();
+        var sessionRef = new AtomicReference<org.agty.aiassistant.chat.ChatSessions.Session>();
+        var previous = new AtomicReference<org.agty.aiassistant.chat.ChatSessions.ProjectSessions>();
+        var runner = project.getService(org.agty.aiassistant.execution.ChatExecutionService.class).runner();
+        var subscription = runner.subscribe(task -> { if (task.session == sessionRef.get() && !task.active()) finished.countDown(); });
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                var store = com.intellij.openapi.application.ApplicationManager.getApplication().getService(org.agty.aiassistant.chat.ChatSessions.class);
+                previous.set(store.getState().projects.remove(projectKey()));
+                var panel = new AiAssistantChatPanel(project, () -> { throw new AssertionError(); }); panelRef.set(panel);
+                var sessions = store.project(projectKey()); var first = sessions.current(); sessionRef.set(first);
+                var request = new org.agty.aiassistant.chat.ChatProvider.Request() {
+                    public void run(java.nio.file.Path path, String prompt, java.util.function.Consumer<ChatEvent> events) throws Exception {
+                        release.await(); events.accept(new ChatEvent(ChatEvent.Kind.MESSAGE, "answer", "", "isolated answer", true));
+                    }
+                    public void cancel() { cancellations.incrementAndGet(); release.countDown(); }
+                };
+                try { runner.start(first, request, directory, "question", "question", "Fixture", false); }
+                catch (Exception e) { throw new AssertionError(e); }
+                var second = sessions.create(); panel.selectSessionById(second.id); panel.dispose();
+                panelRef.set(new AiAssistantChatPanel(project, () -> { throw new AssertionError(); }));
+            });
+            assertEquals(0, cancellations.get()); release.countDown();
+            assertTrue(finished.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            SwingUtilities.invokeAndWait(() -> {
+                assertTrue(sessionRef.get().messages.stream().anyMatch(m -> m.markdown.equals("isolated answer")));
+                panelRef.get().selectSessionById(sessionRef.get().id);
+                assertTrue(component(panelRef.get(), JTextArea.class).getText().isEmpty());
+            });
+        } finally {
+            release.countDown(); subscription.close();
+            SwingUtilities.invokeAndWait(() -> {
+                if (panelRef.get() != null) panelRef.get().dispose();
+                var store = com.intellij.openapi.application.ApplicationManager.getApplication().getService(org.agty.aiassistant.chat.ChatSessions.class);
+                store.getState().projects.remove(projectKey());
+                if (previous.get() != null) store.getState().projects.put(projectKey(), previous.get());
+            });
+            java.nio.file.Files.deleteIfExists(directory);
+        }
+    }
+    @Test void composerFits320PixelsAndPreservesUnknownCommandDraft() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            var panel = new AiAssistantChatPanel(project, () -> { throw new AssertionError("No model call"); });
+            try {
+                panel.setSize(320, 720); layoutTree(panel);
+                var input = component(panel, JTextArea.class);
+                input.setText("/not-a-command keep this draft");
+                input.getActionMap().get("send-message").actionPerformed(new java.awt.event.ActionEvent(input, 0, ""));
+                assertEquals("/not-a-command keep this draft", input.getText());
+                assertTrue(named(panel, "request-options").getWidth() <= 320);
+                assertTrue(named(panel, "chat-composer").getWidth() <= 320);
+                var image = new java.awt.image.BufferedImage(320, 720, java.awt.image.BufferedImage.TYPE_INT_RGB);
+                var graphics = image.createGraphics(); panel.paint(graphics); graphics.dispose();
+                try {
+                    var target = java.nio.file.Path.of("build/reports/screenshots/chat-320.png");
+                    java.nio.file.Files.createDirectories(target.getParent());
+                    javax.imageio.ImageIO.write(image, "png", target.toFile());
+                } catch (java.io.IOException e) { throw new AssertionError(e); }
+            } finally { panel.dispose(); }
+        });
+    }
     @Test void statusButtonRunsCommandAndStatusIsBelowChat() throws Exception {
         AtomicReference<Throwable> failure = new AtomicReference<>();
         SwingUtilities.invokeAndWait(() -> {
             var store = com.intellij.openapi.application.ApplicationManager.getApplication().getService(org.agty.aiassistant.chat.ChatSessions.class);
-            var previous = store.getState().projects.remove("default-project");
+            var previous = store.getState().projects.remove(projectKey());
             AiAssistantChatPanel panel = null;
             try {
                 panel = new AiAssistantChatPanel(project, () -> { throw new AssertionError("No request expected"); });
-                JButton button = (JButton) named(panel, "status-command");
-                assertEquals("Status", button.getText());
-                button.doClick();
-                assertTrue(store.project("default-project").current().messages.stream().anyMatch(m -> m.title.startsWith("/status")));
+                panel.executeCommand(new org.agty.aiassistant.chat.SlashCommands.Invocation("/status", ""));
+                assertTrue(store.project(projectKey()).current().messages.stream().anyMatch(m -> m.title.startsWith("/status")));
                 assertNotNull(named(panel, "chat-status-bar"));
                 assertSame(named(panel, "chat-status-bar"), named(panel, "chat-status").getParent());
             } catch (Throwable e) { failure.set(e); }
             finally {
                 if (panel != null) panel.dispose();
-                store.getState().projects.remove("default-project");
-                if (previous != null) store.getState().projects.put("default-project", previous);
+                store.getState().projects.remove(projectKey());
+                if (previous != null) store.getState().projects.put(projectKey(), previous);
             }
         });
         if (failure.get() != null) throw new AssertionError(failure.get());
@@ -40,10 +107,10 @@ class ChatRenderingTest {
         AtomicReference<Throwable> failure = new AtomicReference<>();
         SwingUtilities.invokeAndWait(() -> {
             var store = com.intellij.openapi.application.ApplicationManager.getApplication().getService(org.agty.aiassistant.chat.ChatSessions.class);
-            var previous = store.getState().projects.remove("default-project");
+            var previous = store.getState().projects.remove(projectKey());
             AiAssistantChatPanel panel = null;
             try {
-                var session = store.project("default-project").current();
+                var session = store.project(projectKey()).current();
                 session.promptHistory.add("предыдущий запрос");
                 panel = new AiAssistantChatPanel(project, () -> { throw new AssertionError("No request expected"); });
                 JTextArea input = component(panel, JTextArea.class);
@@ -59,8 +126,8 @@ class ChatRenderingTest {
             } catch (Throwable e) { failure.set(e); }
             finally {
                 if (panel != null) panel.dispose();
-                store.getState().projects.remove("default-project");
-                if (previous != null) store.getState().projects.put("default-project", previous);
+                store.getState().projects.remove(projectKey());
+                if (previous != null) store.getState().projects.put(projectKey(), previous);
             }
         });
         if (failure.get() != null) throw new AssertionError(failure.get());
@@ -149,33 +216,33 @@ class ChatRenderingTest {
         SwingUtilities.invokeAndWait(() -> {
             var store = com.intellij.openapi.application.ApplicationManager.getApplication()
                     .getService(org.agty.aiassistant.chat.ChatSessions.class);
-            var previous = store.getState().projects.remove("default-project");
+            var previous = store.getState().projects.remove(projectKey());
             AiAssistantChatPanel panel = null;
             try {
                 panel = new AiAssistantChatPanel(project, () -> { throw new AssertionError("No model needed"); });
                 JTextArea input = component(panel, JTextArea.class);
 
                 input.setText("first draft");
-                assertTrue(store.project("default-project").current().title.startsWith("first draft"));
+                assertTrue(store.project(projectKey()).current().title.startsWith("first draft"));
                 input.append(" updated");
-                assertTrue(store.project("default-project").current().title.startsWith("first draft updated"));
+                assertTrue(store.project(projectKey()).current().title.startsWith("first draft updated"));
                 menuItem(panel.sessionMenu(), "+ Новый чат").doClick();
-                assertEquals(2, store.project("default-project").sessions.size());
+                assertEquals(2, store.project(projectKey()).sessions.size());
                 assertEquals("", input.getText());
                 input.setText("second draft");
-                selectMenuSession(panel, store.project("default-project").sessions.get(0).id);
+                selectMenuSession(panel, store.project(projectKey()).sessions.get(0).id);
                 assertEquals("first draft updated", input.getText());
-                selectMenuSession(panel, store.project("default-project").sessions.get(1).id);
+                selectMenuSession(panel, store.project(projectKey()).sessions.get(1).id);
                 assertEquals("second draft", input.getText());
                 panel.dispose();
                 panel = new AiAssistantChatPanel(project, () -> { throw new AssertionError("No model needed"); });
-                assertEquals(store.project("default-project").sessions.get(1).id, store.project("default-project").selected);
+                assertEquals(store.project(projectKey()).sessions.get(1).id, store.project(projectKey()).selected);
                 assertEquals("second draft", component(panel, JTextArea.class).getText());
             } catch (Throwable e) { failure.set(e); }
             finally {
                 if (panel != null) panel.dispose();
-                store.getState().projects.remove("default-project");
-                if (previous != null) store.getState().projects.put("default-project", previous);
+                store.getState().projects.remove(projectKey());
+                if (previous != null) store.getState().projects.put(projectKey(), previous);
             }
         });
         if (failure.get() != null) throw new AssertionError(failure.get());
@@ -188,7 +255,7 @@ class ChatRenderingTest {
         AtomicReference<Throwable> failure = new AtomicReference<>();
         SwingUtilities.invokeAndWait(() -> {
             var store = com.intellij.openapi.application.ApplicationManager.getApplication().getService(org.agty.aiassistant.chat.ChatSessions.class);
-            var previous = store.getState().projects.remove("default-project");
+            var previous = store.getState().projects.remove(projectKey());
             AiAssistantChatPanel panel = null;
             try {
                 panel = new AiAssistantChatPanel(project, () -> { throw new AssertionError("A slash command must not instantiate a model"); });
@@ -197,7 +264,7 @@ class ChatRenderingTest {
                     input.setText(command);
                     input.getActionMap().get("send-message").actionPerformed(new java.awt.event.ActionEvent(input, 0, ""));
                 }
-                var state = store.project("default-project");
+                var state = store.project(projectKey());
                 assertTrue(state.writeAccess);
                 assertEquals("Новая сессия", state.current().title);
                 assertTrue(state.current().history.isEmpty());
@@ -215,8 +282,8 @@ class ChatRenderingTest {
             } catch (Throwable e) { failure.set(e); }
             finally {
                 if (panel != null) panel.dispose();
-                store.getState().projects.remove("default-project");
-                if (previous != null) store.getState().projects.put("default-project", previous);
+                store.getState().projects.remove(projectKey());
+                if (previous != null) store.getState().projects.put(projectKey(), previous);
             }
         });
         if (failure.get() != null) throw new AssertionError(failure.get());
@@ -229,14 +296,14 @@ class ChatRenderingTest {
         AtomicReference<Throwable> failure = new AtomicReference<>();
         SwingUtilities.invokeAndWait(() -> {
             var store = com.intellij.openapi.application.ApplicationManager.getApplication().getService(org.agty.aiassistant.chat.ChatSessions.class);
-            var previous = store.getState().projects.remove("default-project");
+            var previous = store.getState().projects.remove(projectKey());
             var appearance = org.agty.aiassistant.settings.ChatAppearance.getInstance();
             int oldRows = appearance.getState().inputRows;
             AiAssistantChatPanel panel = null;
             try {
                 panel = new AiAssistantChatPanel(project, () -> { throw new AssertionError("No request expected"); });
                 var input = component(panel, JTextArea.class);
-                var initial = store.project("default-project").current();
+                var initial = store.project(projectKey()).current();
                 input.setText("/help");
                 input.getActionMap().get("send-message").actionPerformed(new java.awt.event.ActionEvent(input, 0, ""));
                 input.setText("/permissions workspace-write");
@@ -258,8 +325,8 @@ class ChatRenderingTest {
                 assertNotNull(named(panel, "editor-resize-handle"));
                 menuItem(panel.sessionMenu(), "Завершить текущую сессию").doClick();
                 assertTrue(initial.closed);
-                assertNotEquals(initial.id, store.project("default-project").selected);
-                assertEquals(2, store.project("default-project").sessions.size());
+                assertNotEquals(initial.id, store.project(projectKey()).selected);
+                assertEquals(2, store.project(projectKey()).sessions.size());
                 selectMenuSession(panel, initial.id);
                 assertFalse(initial.closed);
                 assertEquals("unfinished draft", input.getText());
@@ -268,8 +335,8 @@ class ChatRenderingTest {
             finally {
                 if (panel != null) panel.dispose();
                 appearance.getState().inputRows = oldRows; appearance.update(appearance.getState());
-                store.getState().projects.remove("default-project");
-                if (previous != null) store.getState().projects.put("default-project", previous);
+                store.getState().projects.remove(projectKey());
+                if (previous != null) store.getState().projects.put(projectKey(), previous);
             }
         });
         if (failure.get() != null) throw new AssertionError(failure.get());
@@ -284,7 +351,7 @@ class ChatRenderingTest {
         AtomicReference<Throwable> failure = new AtomicReference<>();
         SwingUtilities.invokeAndWait(() -> {
             var store = com.intellij.openapi.application.ApplicationManager.getApplication().getService(org.agty.aiassistant.chat.ChatSessions.class);
-            var previous = store.getState().projects.remove("default-project");
+            var previous = store.getState().projects.remove(projectKey());
             AiAssistantChatPanel panel = null;
             var choices = java.util.List.of(
                     new org.agty.aiassistant.chat.ChatProviderRegistry.Choice("codex", "Codex", () -> { throw new AssertionError("No request expected"); }),
@@ -294,16 +361,16 @@ class ChatRenderingTest {
                 JTextArea input = component(panel, JTextArea.class);
                 JComboBox<?> picker = (JComboBox<?>) named(panel, "llm-picker");
                 input.setText("Codex draft");
-                var codex = store.project("default-project").current();
+                var codex = store.project(projectKey()).current();
                 codex.codexId = "019e309f-5fe7-7a93-90d0-ce794686cdfd";
                 picker.setSelectedIndex(1);
-                var other = store.project("default-project").current();
+                var other = store.project(projectKey()).current();
                 assertEquals("test-llm", other.providerId);
                 assertEquals("", other.remoteId());
                 assertEquals("", input.getText());
                 input.setText("Other draft");
                 picker.setSelectedIndex(0);
-                assertEquals(codex.id, store.project("default-project").selected);
+                assertEquals(codex.id, store.project(projectKey()).selected);
                 assertEquals("Codex draft", input.getText());
                 picker.setSelectedIndex(1);
                 assertEquals("Other draft", input.getText());
@@ -322,8 +389,8 @@ class ChatRenderingTest {
             } catch (Throwable e) { failure.set(e); }
             finally {
                 if (panel != null) panel.dispose();
-                store.getState().projects.remove("default-project");
-                if (previous != null) store.getState().projects.put("default-project", previous);
+                store.getState().projects.remove(projectKey());
+                if (previous != null) store.getState().projects.put(projectKey(), previous);
             }
         });
         if (failure.get() != null) throw new AssertionError(failure.get());
@@ -332,13 +399,13 @@ class ChatRenderingTest {
         AtomicReference<Throwable> failure = new AtomicReference<>();
         SwingUtilities.invokeAndWait(() -> {
             var store = com.intellij.openapi.application.ApplicationManager.getApplication().getService(org.agty.aiassistant.chat.ChatSessions.class);
-            var previous = store.getState().projects.remove("default-project");
+            var previous = store.getState().projects.remove(projectKey());
             AiAssistantChatPanel panel = null;
             var choices = java.util.List.of(new org.agty.aiassistant.chat.ChatProviderRegistry.Choice("codex", "Codex", () -> { throw new AssertionError("No request expected"); }));
             var catalog = java.util.List.of(new org.agty.aiassistant.core.CodexModels.Model("a", "engine-a", "Model 10 extended context"), new org.agty.aiassistant.core.CodexModels.Model("b", "engine-b", "Model 2 extended context",
                     java.util.List.of(new org.agty.aiassistant.core.CodexModels.Effort("low", "Fast"), new org.agty.aiassistant.core.CodexModels.Effort("high", "Thorough")), "low"));
             try {
-                var session = store.project("default-project").current();
+                var session = store.project(projectKey()).current();
                 session.history = "Existing conversation";
                 session.codexId = "019e309f-5fe7-7a93-90d0-ce794686cdfd";
                 panel = new AiAssistantChatPanel(project, choices, false);
@@ -349,7 +416,7 @@ class ChatRenderingTest {
                 assertEquals("engine-a", ((org.agty.aiassistant.chat.ChatProviderRegistry.Choice) picker.getItemAt(2)).model());
                 assertTrue(picker.getMinimumPopupWidth() > picker.getFontMetrics(picker.getFont()).stringWidth("Codex · Model 10 extended context"));
                 picker.setSelectedIndex(1);
-                assertSame(session, store.project("default-project").current());
+                assertSame(session, store.project(projectKey()).current());
                 assertEquals("engine-b", session.selectedModel);
                 assertEquals("low", session.reasoningEffort);
                 var effort = (JComboBox<?>) named(panel, "reasoning-effort");
@@ -371,8 +438,8 @@ class ChatRenderingTest {
             } catch (Throwable e) { failure.set(e); }
             finally {
                 if (panel != null) panel.dispose();
-                store.getState().projects.remove("default-project");
-                if (previous != null) store.getState().projects.put("default-project", previous);
+                store.getState().projects.remove(projectKey());
+                if (previous != null) store.getState().projects.put(projectKey(), previous);
             }
         });
         if (failure.get() != null) throw new AssertionError(failure.get());

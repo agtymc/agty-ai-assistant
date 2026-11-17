@@ -6,15 +6,25 @@ import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public record ChangeSet(List<FileChange> files) {
-    public record FileChange(String path, String beforeSha256, String beforeText, String unifiedDiff) {
+    public record Hunk(int id, String path, int oldStart, int newStart, int newCount, String text) {}
+
+    public record FileChange(String path, String beforeSha256, String beforeText, String unifiedDiff, List<Hunk> hunks) {
         public boolean conflictsWith(String currentText) {
             return beforeSha256 != null && !beforeSha256.isBlank() && !sha256(currentText).equals(beforeSha256);
         }
 
         public String afterText() {
-            return applyUnifiedDiff(beforeText, unifiedDiff);
+            return afterText(Set.of());
+        }
+
+        public String afterText(Set<Integer> selectedHunks) {
+            if (selectedHunks == null || selectedHunks.isEmpty()) return applyUnifiedDiff(beforeText, unifiedDiff);
+            StringBuilder selected = new StringBuilder(fileHeader(unifiedDiff));
+            for (Hunk hunk : hunks) if (selectedHunks.contains(hunk.id())) selected.append(hunk.text());
+            return applyUnifiedDiff(beforeText, selected.toString());
         }
     }
 
@@ -39,14 +49,34 @@ public record ChangeSet(List<FileChange> files) {
     }
 
     public String preview() {
+        return preview(Set.of());
+    }
+
+    public String preview(Set<Integer> selectedHunks) {
         StringBuilder out = new StringBuilder();
         for (FileChange file : files) {
+            if (selectedHunks != null && !selectedHunks.isEmpty() && !containsSelectedHunk(file, selectedHunks)) continue;
             out.append("FILE: ").append(file.path()).append('\n');
-            out.append(file.unifiedDiff());
-            if (!file.unifiedDiff().endsWith("\n")) out.append('\n');
+            if (selectedHunks == null || selectedHunks.isEmpty()) out.append(file.unifiedDiff());
+            else {
+                out.append(fileHeader(file.unifiedDiff()));
+                for (Hunk hunk : file.hunks()) if (selectedHunks.contains(hunk.id())) out.append(hunk.text());
+            }
+            if (!out.toString().endsWith("\n")) out.append('\n');
             out.append('\n');
         }
         return out.toString().stripTrailing();
+    }
+
+    private static boolean containsSelectedHunk(FileChange file, Set<Integer> selectedHunks) {
+        for (Hunk hunk : file.hunks()) if (selectedHunks.contains(hunk.id())) return true;
+        return false;
+    }
+
+    public List<Hunk> hunks() {
+        List<Hunk> result = new ArrayList<>();
+        for (FileChange file : files) result.addAll(file.hunks());
+        return List.copyOf(result);
     }
 
     public List<String> conflicts(Map<String, String> currentTexts) {
@@ -61,7 +91,7 @@ public record ChangeSet(List<FileChange> files) {
     private static void flush(List<FileChange> files, String path, StringBuilder diff, Map<String, String> originalTexts) {
         if (path == null || path.isBlank() || diff.isEmpty()) return;
         String original = originalTexts.getOrDefault(path, "");
-        files.add(new FileChange(path, sha256(original), original, diff.toString()));
+        files.add(new FileChange(path, sha256(original), original, diff.toString(), parseHunks(path, diff.toString())));
     }
 
     private static String pathFromDiffHeader(String line) {
@@ -70,6 +100,34 @@ public record ChangeSet(List<FileChange> files) {
         String path = parts[3];
         if (path.startsWith("b/")) path = path.substring(2);
         return path;
+    }
+
+    private static List<Hunk> parseHunks(String path, String diff) {
+        List<Hunk> result = new ArrayList<>();
+        String[] lines = diff.split("\n", -1);
+        int idBase = Math.abs(path.hashCode() * 31);
+        for (int i = 0; i < lines.length; i++) {
+            if (!lines[i].startsWith("@@ ")) continue;
+            ParsedHunkHeader header = ParsedHunkHeader.parse(lines[i]);
+            StringBuilder text = new StringBuilder(lines[i]).append('\n');
+            i++;
+            while (i < lines.length && !lines[i].startsWith("@@ ") && !lines[i].startsWith("diff --git ")) {
+                if (!lines[i].isEmpty() || i < lines.length - 1) text.append(lines[i]).append('\n');
+                i++;
+            }
+            i--;
+            result.add(new Hunk(idBase + result.size() + 1, path, header.oldStart(), header.newStart(), header.newCount(), text.toString()));
+        }
+        return List.copyOf(result);
+    }
+
+    private static String fileHeader(String diff) {
+        StringBuilder header = new StringBuilder();
+        for (String line : diff.split("\n", -1)) {
+            if (line.startsWith("@@ ")) break;
+            if (!line.isEmpty()) header.append(line).append('\n');
+        }
+        return header.toString();
     }
 
     static String sha256(String text) {
@@ -89,8 +147,8 @@ public record ChangeSet(List<FileChange> files) {
         for (int i = 0; i < diffLines.length; i++) {
             String line = diffLines[i];
             if (!line.startsWith("@@ ")) continue;
-            Hunk hunk = Hunk.parse(line);
-            while (originalIndex < hunk.oldStart - 1 && originalIndex < originalLines.size())
+            ParsedHunkHeader hunk = ParsedHunkHeader.parse(line);
+            while (originalIndex < hunk.oldStart() - 1 && originalIndex < originalLines.size())
                 result.add(originalLines.get(originalIndex++));
             i++;
             while (i < diffLines.length && !diffLines[i].startsWith("@@ ") && !diffLines[i].startsWith("diff --git ")) {
@@ -111,14 +169,20 @@ public record ChangeSet(List<FileChange> files) {
         return joinLines(result, original.endsWith("\n"));
     }
 
-    private record Hunk(int oldStart) {
-        static Hunk parse(String header) {
+    private record ParsedHunkHeader(int oldStart, int newStart, int newCount) {
+        static ParsedHunkHeader parse(String header) {
             int minus = header.indexOf('-');
             int comma = header.indexOf(',', minus);
             int space = header.indexOf(' ', minus);
             int end = comma > 0 && comma < space ? comma : space;
             if (minus < 0 || end <= minus) throw new IllegalArgumentException("Некорректный hunk header: " + header);
-            return new Hunk(Integer.parseInt(header.substring(minus + 1, end)));
+            int plus = header.indexOf('+');
+            int plusComma = header.indexOf(',', plus);
+            int plusSpace = header.indexOf(' ', plus);
+            int plusEnd = plusComma > 0 && plusComma < plusSpace ? plusComma : plusSpace;
+            int newCount = plusComma > 0 && plusComma < plusSpace ? Integer.parseInt(header.substring(plusComma + 1, plusSpace)) : 1;
+            return new ParsedHunkHeader(Integer.parseInt(header.substring(minus + 1, end)),
+                    Integer.parseInt(header.substring(plus + 1, plusEnd)), newCount);
         }
     }
 

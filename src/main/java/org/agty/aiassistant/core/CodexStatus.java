@@ -10,8 +10,18 @@ import java.time.format.DateTimeFormatter;
 
 /** Whitelist public status fields; never render raw configuration or authentication responses. */
 public final class CodexStatus {
-    public static String read(String binary, Path root, String threadId, String selectedModel, String selectedEffort, boolean writeAccess) throws Exception {
+    public static String read(String binary, Path root, String threadId, String selectedModel,
+                              String selectedEffort, boolean writeAccess) throws Exception {
+        return read(binary, root, threadId, selectedModel, selectedEffort, writeAccess, false);
+    }
+    public static String read(String binary, Path root, String threadId, String selectedModel, String selectedEffort,
+                              boolean writeAccess, boolean unrestrictedAccess) throws Exception {
         try (var client = new CodexSessionClient(binary, root)) {
+            return read(client, root, threadId, selectedModel, selectedEffort, writeAccess, unrestrictedAccess, false);
+        }
+    }
+    static String read(CodexSessionClient client, Path root, String threadId, String selectedModel, String selectedEffort,
+                       boolean writeAccess, boolean unrestrictedAccess, boolean interactive) throws Exception {
             JsonObject thread = null;
             TurnModel last = null;
             if (!threadId.isBlank()) {
@@ -40,8 +50,9 @@ public final class CodexStatus {
             else result.append('`').append(clean(last.model())).append("` (reasoning `").append(clean(last.effort())).append("`)\n");
             result.append("- **Model provider:** `").append(clean(provider)).append("`\n")
                     .append("- **Directory:** `").append(clean(root.toString())).append("`\n")
-                    .append("- **Permissions:** ").append(writeAccess ? "редактирование проекта" : "только чтение")
-                    .append("; approval `never`\n")
+                    .append("- **Permissions:** ").append(unrestrictedAccess ? "без ограничений (файлы и сеть)"
+                            : writeAccess ? "редактирование проекта" : "только чтение")
+                    .append("; approval `").append(interactive && !unrestrictedAccess ? "on-request" : "never").append("`\n")
                     .append("- **Agents.md:** ").append(Files.isRegularFile(root.resolve("AGENTS.md")) ? "`AGENTS.md`" : "не найден")
                     .append("\n- **Collaboration mode:** не предоставлен API плагина\n")
                     .append("- **Session:** `").append(clean(threadId)).append("`\n");
@@ -56,7 +67,6 @@ public final class CodexStatus {
             try { result.append("\n").append(limits(client.call("account/rateLimits/read", new JsonObject()))); }
             catch (Exception e) { result.append("\n- Лимиты: недоступны для этого подключения или API.\n"); }
             return result.toString();
-        }
     }
     private static String clean(String value) {
         return value == null || value.isBlank() ? "не предоставлено" : value.replace('`', ' ').replace('\n', ' ').replace('\r', ' ');

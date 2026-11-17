@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>org.agty.aiassistant</id>
     <name>AGTY AI Assistant</name>
-    <version>0.11.0</version>
+    <version>0.13.0</version>
     <idea-version since-build="253" until-build="253.*"/>
     <vendor>AGTY</vendor>
     <description><![CDATA[
@@ -10,6 +10,8 @@
     ]]></description>
     <depends>com.intellij.modules.platform</depends>
     <extensions defaultExtensionNs="com.intellij">
+        <notificationGroup id="AGTY Codex requests" displayType="BALLOON" isLogByDefault="true"/>
+        <fileEditorProvider implementation="org.agty.aiassistant.help.CommandHelpEditorProvider"/>
         <applicationConfigurable parentId="tools" id="org.agty.aiassistant.settings"
             displayName="AGTY AI Assistant"
             instance="org.agty.aiassistant.settings.CodexConfigurable"/>
@@ -18,4 +20,29 @@
         <toolWindow id="AGTY AI Assistant" anchor="right" icon="/icons/agty.svg"
             factoryClass="org.agty.aiassistant.ui.AiAssistantToolWindowFactory"/>
     </extensions>
+    <actions>
+        <group id="org.agty.aiassistant.editor.group" text="AGTY AI Assistant" popup="true">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <action id="org.agty.aiassistant.editor.explain"
+                class="org.agty.aiassistant.actions.ExplainEditorContextAction"
+                text="Объяснить"
+                description="Объяснить выделенный код или текущий файл в AGTY AI Assistant"/>
+            <action id="org.agty.aiassistant.editor.findProblems"
+                class="org.agty.aiassistant.actions.FindProblemsEditorContextAction"
+                text="Найти проблемы"
+                description="Найти потенциальные проблемы в выделенном коде или текущем файле"/>
+            <action id="org.agty.aiassistant.editor.suggestFix"
+                class="org.agty.aiassistant.actions.SuggestFixEditorContextAction"
+                text="Предложить исправление"
+                description="Предложить исправление для выделенного кода или текущего файла через diff-review"/>
+            <action id="org.agty.aiassistant.editor.refactor"
+                class="org.agty.aiassistant.actions.RefactorEditorContextAction"
+                text="Рефакторинг"
+                description="Предложить рефакторинг выделенного кода или текущего файла через diff-review"/>
+            <action id="org.agty.aiassistant.editor.generateCode"
+                class="org.agty.aiassistant.actions.GenerateCodeEditorContextAction"
+                text="Сгенерировать код"
+                description="Сгенерировать код для выделения или текущего файла через diff-review"/>
+        </group>
+    </actions>
 </idea-plugin>

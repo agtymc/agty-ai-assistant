@@ -24,7 +24,9 @@ import java.util.*;
 import java.util.function.Consumer;
 
 public final class ChatTranscript extends JPanel implements Disposable {
-    private record Entry(String title, String markdown, boolean activity, boolean complete) {}
+    private record Entry(String title, String markdown, boolean activity, boolean complete, String artifact) {
+        Entry(String title, String markdown, boolean activity, boolean complete) { this(title, markdown, activity, complete, ""); }
+    }
     private final Project project;
     private BrowserTranscript browser;
     private final Runnable appearanceListener = this::schedule;
@@ -47,9 +49,15 @@ public final class ChatTranscript extends JPanel implements Disposable {
         entries.forEach((id, entry) -> {
             var message = new org.agty.aiassistant.chat.ChatSessions.Message();
             message.id = id; message.title = entry.title(); message.markdown = entry.markdown();
-            message.activity = entry.activity(); message.complete = entry.complete(); result.add(message);
+            message.activity = entry.activity(); message.complete = entry.complete(); message.artifact = entry.artifact(); result.add(message);
         });
         return result;
+    }
+    public void synchronize(java.util.List<org.agty.aiassistant.chat.ChatSessions.Message> messages) {
+        entries.clear();
+        for (var message : messages) entries.put(message.id,
+                new Entry(message.title, message.markdown, message.activity, message.complete, message.artifact));
+        schedule();
     }
     public void restore(java.util.List<org.agty.aiassistant.chat.ChatSessions.Message> messages) {
         entries.clear(); expanded.clear();
@@ -57,7 +65,7 @@ public final class ChatTranscript extends JPanel implements Disposable {
         for (var message : messages) {
             if (message.activity && message.title.startsWith("Пояснение") && message.markdown.isBlank()) continue;
             entries.put(message.id, new Entry(
-                    message.title + (message.complete ? "" : " · прервано"), message.markdown, message.activity, true));
+                    message.title + (message.complete ? "" : " · прервано"), message.markdown, message.activity, true, message.artifact));
         }
         schedule();
     }
@@ -130,12 +138,13 @@ public final class ChatTranscript extends JPanel implements Disposable {
             Entry entry = pair.getValue();
             if (entry.activity() && !appearance.showActivity) continue;
             String style = entry.activity() ? "activity" : entry.title().equals("Вы") ? "user" : "assistant";
-            html.append("<div class=\"card ").append(style).append("\"><div class=\"title\">");
+            html.append("<div data-entry-id=\"").append(MarkdownRenderer.escape(pair.getKey())).append("\" class=\"card ").append(style).append("\"><div class=\"title\">");
             if (entry.activity()) html.append("<a href=\"").append(markdown.action("toggle", pair.getKey())).append("\">")
                     .append(expanded.contains(pair.getKey()) ? "▾ " : "▸ ");
             html.append(MarkdownRenderer.escape(entry.title())).append(entry.complete() ? "" : " · выполняется…");
             if (entry.activity()) html.append("</a>");
-            else html.append(" <a class=\"copy\" href=\"").append(markdown.action("copy", entry.markdown())).append("\">Копировать</a>");
+            else html.append(" <a class=\"copy\" href=\"").append(markdown.action(entry.artifact().isEmpty() ? "copy" : "copy-artifact", entry.artifact().isEmpty() ? entry.markdown() : entry.artifact())).append("\">Копировать</a>");
+            if (!entry.artifact().isEmpty()) html.append(" <a href=\"").append(markdown.action("artifact", entry.artifact())).append("\">Полный результат</a>");
             html.append("</div>");
             if (style.equals("user")) html.append("<div class=\"usertext\">")
                     .append(MarkdownRenderer.userText(entry.markdown(), browser != null))
@@ -156,6 +165,19 @@ public final class ChatTranscript extends JPanel implements Disposable {
             case "copy" -> { CopyPasteManager.getInstance().setContents(new StringSelection(action.value())); status.accept("Скопировано"); }
             case "toggle" -> { if (!expanded.add(action.value())) expanded.remove(action.value()); render(); }
             case "open" -> open(action.value());
+            case "artifact", "copy-artifact" -> ApplicationManager.getApplication().executeOnPooledThread(() -> {
+                try {
+                    String full = org.agty.aiassistant.history.MessageArtifacts.getInstance().read(action.value());
+                    ApplicationManager.getApplication().invokeLater(() -> {
+                        if (disposed || project.isDisposed()) return;
+                        if (action.type().equals("copy-artifact")) CopyPasteManager.getInstance().setContents(new StringSelection(full));
+                        else {
+                            var file = new com.intellij.testFramework.LightVirtualFile("Результат Codex.txt", full); file.setWritable(false);
+                            com.intellij.openapi.application.WriteIntentReadAction.run((Runnable) () -> com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).openFile(file, true));
+                        }
+                    });
+                } catch (Exception e) { ApplicationManager.getApplication().invokeLater(() -> status.accept(e.getMessage())); }
+            });
             default -> { }
         }
     }

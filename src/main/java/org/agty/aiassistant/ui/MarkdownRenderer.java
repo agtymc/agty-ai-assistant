@@ -14,14 +14,18 @@ public final class MarkdownRenderer {
     public record Action(String type, String value) {}
     private final Map<String, Action> actions = new HashMap<>();
     private final BiFunction<String, String, String> highlight;
-    private int sequence;
     private boolean browser;
     public void browser(boolean value) { browser = value; }
     public MarkdownRenderer(BiFunction<String, String, String> highlight) { this.highlight = highlight; }
     public Map<String, Action> actions() { return Map.copyOf(actions); }
     public void reset() { actions.clear(); }
     public String action(String type, String value) {
-        String key = "https://agty.invalid/action/" + sequence++;
+        String key;
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest((type + "\u0000" + value).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            key = "https://agty.invalid/action/" + java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
         actions.put(key, new Action(type, value));
         return key;
     }

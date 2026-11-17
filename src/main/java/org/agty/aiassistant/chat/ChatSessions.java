@@ -9,7 +9,7 @@ import java.util.*;
 @State(name = "AgtyChatSessions", storages = @Storage(value = "agty-chat-sessions.xml", roamingType = RoamingType.DISABLED))
 public final class ChatSessions implements PersistentStateComponent<ChatSessions.Data> {
     public static final class Message {
-        public String id = "", title = "", markdown = "";
+        public String id = "", title = "", markdown = "", artifact = "";
         public boolean activity, complete = true;
     }
     public static final class Session {
@@ -20,6 +20,7 @@ public final class ChatSessions implements PersistentStateComponent<ChatSessions
         public boolean customTitle;
         public boolean closed;
         public List<String> promptHistory = new ArrayList<>();
+        public String historyCursor = "";
         public String tokenUsage = "", effectiveModel = "", selectedModel = "", reasoningEffort = "", confirmedThreadId = "";
         public List<Message> messages = new ArrayList<>();
         @Override public String toString() { return title + "  ·  " + (remoteId().isEmpty() ? "локальная " + id.substring(0, 8) : remoteId()); }
@@ -27,6 +28,8 @@ public final class ChatSessions implements PersistentStateComponent<ChatSessions
     public static final class ProjectSessions {
         public String selected = "";
         public boolean writeAccess;
+        public boolean unrestrictedAccess;
+        public boolean interactiveApprovals;
         public Map<String, String> providerSelections = new LinkedHashMap<>();
         public List<Session> sessions = new ArrayList<>();
         public Session current() {
@@ -47,7 +50,7 @@ public final class ChatSessions implements PersistentStateComponent<ChatSessions
     }
     private Data data = new Data();
     public ProjectSessions project(String directory) {
-        return data.projects.computeIfAbsent(directory, key -> new ProjectSessions());
+        return data.projects.computeIfAbsent(directory, key -> freshProject());
     }
     public ProjectSessions project(String identity, Collection<String> legacyKeys) {
         ProjectSessions current = data.projects.get(identity);
@@ -62,7 +65,11 @@ public final class ChatSessions implements PersistentStateComponent<ChatSessions
                 }
             }
         }
-        return data.projects.computeIfAbsent(identity, key -> new ProjectSessions());
+        return data.projects.computeIfAbsent(identity, key -> freshProject());
+    }
+    private static ProjectSessions freshProject() {
+        var project = new ProjectSessions(); project.writeAccess = true; project.interactiveApprovals = true;
+        return project;
     }
     @Override public @NotNull Data getState() { return data; }
     @Override public void loadState(@NotNull Data state) { data = state; }
