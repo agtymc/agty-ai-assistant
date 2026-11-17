@@ -13,7 +13,7 @@ python3 scripts/generate_command_docs.py
 git diff --check
 ```
 
-- 120 тестов, 0 падений, ошибок и пропусков в полном прогоне с обоими smoke-флагами.
+- 121 тест, 0 падений, ошибок и пропусков в полном прогоне с обоими smoke-флагами.
 - `buildPlugin`, `verifyPluginStructure`, `verifyPlugin`: BUILD SUCCESSFUL. Plugin Verifier: **Compatible** с IU-253.28294.334; отмечены обращения к экспериментальному API платформы `WriteIntentReadAction`. Целевой диапазон остаётся 253.*.
 - Verifier выдал HTTP 451 при попытке загрузить сторонние необязательные плагины IDE (CLion Radler/Go Template); итоговый вердикт плагина — Compatible. Эти предупреждения не скрыты настройками failureLevel.
 - Установочный ZIP: `build/distributions/agty-ai-assistant-0.14.0.zip`.
@@ -39,6 +39,8 @@ git diff --check
 ## Платформы и границы проверки
 
 CI выполняет `test buildPlugin verifyPluginStructure verifyPlugin`, проверяет воспроизводимость Markdown и сохраняет ZIP/отчёты для Linux, Windows и macOS. На Linux дополнительно выполняется полный набор с нативным JCEF под Xvfb. Результаты удалённого запуска фиксируются ниже после завершения jobs.
+
+Первый прогон выявил и позволил исправить alias-пути (`/var`/`/private/var`, Windows 8.3), UTF-8 вывода Java fixtures и зависимость тестового worktree от `core.autocrlf`. Повторный Linux-прогон выявил непригодность кэширования распакованного IDE/JBR в immutable Gradle transforms: CI теперь кэширует только скачанные modules-2/wrapper, пересоздавая распакованные SDK из архивов.
 
 Не утверждается совместимость с другими CLI/ветками IDEA. Наличие обработчика интеграции не гарантирует наличие у аккаунта skills/apps/Daybreak или настроенного внешнего MCP-сервера. Проверка не меняла реальную глобальную конфигурацию пользователя и не устанавливала сторонние плагины. Реальный вход/выход OAuth не выполнялся поверх действующей авторизации; RPC и явные пользовательские действия реализованы отдельно от read-only smoke.
 

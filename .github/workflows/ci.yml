@@ -21,6 +21,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,7 +31,17 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: gradle
+
+      # Extracted IDE/JBR transforms can change at runtime. Cache downloads only,
+      # so restored Gradle immutable workspaces are always rebuilt from their archives.
+      - name: Cache Gradle dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.gradle.kts', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: downloads-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Make Gradle executable
         shell: bash

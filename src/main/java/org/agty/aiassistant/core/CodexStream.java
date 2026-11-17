@@ -93,7 +93,15 @@ final class CodexStream {
                             .append(string(entry, "diff")).append("\n```\n");
                 }
                 value = changes.toString(); }
-            case "webSearch" -> { title = "Поиск"; value = string(item, "query"); }
+            case "webSearch" -> {
+                title = "Поиск";
+                StringBuilder search = new StringBuilder(string(item, "query"));
+                if (item.has("action") && item.get("action").isJsonObject()) searchLink(search, item.getAsJsonObject("action"));
+                if (item.has("results") && item.get("results").isJsonArray()) for (var result : item.getAsJsonArray("results"))
+                    if (result.isJsonObject()) searchLink(search, result.getAsJsonObject());
+                // Preserve opaque result fields for both live cards and native history replay.
+                value = search + "\n\n```json\n" + item + "\n```";
+            }
             case "mcpToolCall" -> { title = "Инструмент · " + string(item, "server") + " / " + string(item, "tool"); value = item.toString(); }
             case "plan" -> { title = "План"; value = string(item, "text"); }
             case "userMessage" -> { return ChatEvent.simple(IGNORE, ""); }
@@ -120,6 +128,16 @@ final class CodexStream {
             default -> { title = "Неизвестный элемент · " + type; value = item.toString(); }
         }
         return new ChatEvent(ACTIVITY, id, title, value, complete, "", item.deepCopy());
+    }
+    private static void searchLink(StringBuilder text, JsonObject result) {
+        String url = string(result, "url");
+        try {
+            var uri = java.net.URI.create(url);
+            if (!Set.of("http", "https").contains(uri.getScheme()) || uri.getHost() == null) return;
+            String title = string(result, "title");
+            text.append("\n- [").append((title.isBlank() ? url : title).replace("[", "\\[").replace("]", "\\]").replace('\n', ' '))
+                    .append("](<").append(uri.toASCIIString().replace("<", "%3C").replace(">", "%3E")).append(">)");
+        } catch (IllegalArgumentException ignored) { }
     }
     List<ChatEvent> replay(JsonObject turn) {
         List<ChatEvent> events = new ArrayList<>();
