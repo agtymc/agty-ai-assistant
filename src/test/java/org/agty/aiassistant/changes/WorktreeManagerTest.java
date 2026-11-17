@@ -17,7 +17,9 @@ class WorktreeManagerTest {
         Files.writeString(root.resolve("file"), "user draft\n");
         Path target = root.resolve("isolated"); WorktreeManager.create(root, target, "fixture-worktree");
         assertEquals("user draft\n", Files.readString(root.resolve("file"))); assertEquals("base\n", Files.readString(target.resolve("file")));
-        assertTrue(WorktreeManager.list(root).stream().anyMatch(item -> item.directory().equals(target.toAbsolutePath()) && item.branch().equals("fixture-worktree")));
+        boolean listed = false;
+        for (var item : WorktreeManager.list(root)) if (item.directory().toRealPath().equals(target.toRealPath()) && item.branch().equals("fixture-worktree")) listed = true;
+        assertTrue(listed);
         assertThrows(java.io.IOException.class, () -> WorktreeManager.create(root, root, "other"));
         assertThrows(java.io.IOException.class, () -> WorktreeManager.create(root, root.resolve("bad"), "--force"));
     }
