@@ -28,6 +28,8 @@
 
 Семантика `/approve` сверена с [исходником эталонного Codex 0.169.0](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/core/src/session/handlers.rs). Штатный ACK turn/interrupt в этой версии уже соответствует TurnAborted; дополнительное ожидание terminal state — усиление защиты от гонок и ошибок, а не заявление об ошибке штатного ACK.
 
+Windows DACL проверяется вместе с управлением наследованием: обычное назначение ACL через SetNamedSecurityInfo может изменить модель наследования. Основание: [Microsoft — автоматическое наследование ACE](https://learn.microsoft.com/en-us/windows/win32/secauthz/automatic-propagation-of-inheritable-aces). После переноса требуется совпадение сохранённого состояния.
+
 ## Проверки
 
 Команда итогового локального прогона:

@@ -116,17 +116,40 @@ public final class FileMetadata {
         int control = json.get("control").getAsInt(); byte[] bytes = Base64.getDecoder().decode(json.get("acl").getAsString());
         if ((control & ~0x1500) != 0 || bytes.length < 8 || bytes.length > MAX_ACL) throw new IOException("Некорректный снимок Windows DACL.");
         var library = NativeLibrary.getInstance("advapi32");
-        try (var acl = new Memory(bytes.length)) {
+        try (var acl = new Memory(bytes.length); var descriptor = new Memory(64)) {
             acl.write(0, bytes, 0, bytes.length);
             if (Short.toUnsignedInt(acl.getShort(2)) != bytes.length
                     || library.getFunction("IsValidAcl", Function.ALT_CONVENTION).invokeInt(new Object[]{acl}) == 0)
                 throw new IOException("Некорректный снимок Windows ACL.");
-            int information = 4 | ((control & 0x1000) != 0 ? 0x80000000 : 0x20000000);
-            int result = library.getFunction("SetNamedSecurityInfoW", Function.ALT_CONVENTION).invokeInt(new Object[]{
-                    new WString(path.toString()), 1, information, Pointer.NULL, Pointer.NULL, acl, Pointer.NULL});
-            if (result != 0) throw new IOException("Сохранение Windows DACL: error " + result);
+            // SetNamedSecurityInfo reprocesses inherited ACEs and AUTO_INHERITED, so it cannot
+            // round-trip the source descriptor. The low-level API copies the actual DACL state.
+            // An absolute SECURITY_DESCRIPTOR is 40 bytes on Win64 (20 on Win32); keep room
+            // for either layout and let the native functions initialize every relevant field.
+            descriptor.clear();
+            if (library.getFunction("InitializeSecurityDescriptor", Function.ALT_CONVENTION)
+                    .invokeInt(new Object[]{descriptor, 1}) == 0) throw nativeError("Создание Windows security descriptor");
+            if (library.getFunction("SetSecurityDescriptorDacl", Function.ALT_CONVENTION)
+                    .invokeInt(new Object[]{descriptor, 1, acl, 0}) == 0) throw nativeError("Создание Windows DACL");
+            // Microsoft's KB102102, step 19: the low-level setter needs AUTO_INHERIT_REQ
+            // alongside AUTO_INHERITED to retain the latter; the request is consumed by Windows.
+            int inputControl = control | ((control & 0x0400) != 0 ? 0x0100 : 0);
+            if (library.getFunction("SetSecurityDescriptorControl", Function.ALT_CONVENTION)
+                    .invokeInt(new Object[]{descriptor, (short) 0x1500, (short) inputControl}) == 0)
+                throw nativeError("Сохранение Windows DACL control");
+            if (library.getFunction("SetFileSecurityW", Function.ALT_CONVENTION)
+                    .invokeInt(new Object[]{new WString(path.toString()), 4, descriptor}) == 0)
+                throw nativeError("Сохранение Windows DACL");
         }
-        if (!windowsDacl(path).equals(encoded)) throw new IOException("Windows не сохранила DACL/inheritance в точности; замена запрещена.");
+        String actual = windowsDacl(path);
+        if (!actual.equals(encoded)) {
+            var actualJson = com.google.gson.JsonParser.parseString(actual).getAsJsonObject();
+            byte[] actualBytes = Base64.getDecoder().decode(actualJson.get("acl").getAsString());
+            int expectedCount = Byte.toUnsignedInt(bytes[4]) | Byte.toUnsignedInt(bytes[5]) << 8;
+            int actualCount = Byte.toUnsignedInt(actualBytes[4]) | Byte.toUnsignedInt(actualBytes[5]) << 8;
+            throw new IOException("Windows не сохранила DACL/inheritance в точности; замена запрещена. control=0x"
+                    + Integer.toHexString(control) + "/0x" + Integer.toHexString(actualJson.get("control").getAsInt())
+                    + ", ACEcount=" + expectedCount + "/" + actualCount + ", ACLbytesEqual=" + Arrays.equals(bytes, actualBytes));
+        }
     }
     private static String linuxAcl(Path path) throws IOException {
         return new com.google.gson.Gson().toJson(linuxAccessAttributes(path));
