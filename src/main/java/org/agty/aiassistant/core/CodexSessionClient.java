@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 /** Read-only app-server requests use the same executable/environment as chat. */
 public final class CodexSessionClient implements AutoCloseable {
     private final Process process;
+    private final OwnedProcessTermination termination;
     private final java.util.function.BooleanSupplier cancelled;
     private final ProtocolBuffer.Budget notificationBudget = new ProtocolBuffer.Budget(32_000_000);
     private final ProtocolBuffer notifications = new ProtocolBuffer(2048, notificationBudget);
@@ -76,6 +77,7 @@ public final class CodexSessionClient implements AutoCloseable {
         this.cancelled = cancelled;
         process = new ProcessBuilder(command)
                 .directory(directory.toFile()).start();
+        termination = new OwnedProcessTermination(process);
         writer = process.outputWriter(StandardCharsets.UTF_8);
         Thread.startVirtualThread(() -> {
             try (var reader = process.inputReader(StandardCharsets.UTF_8)) {
@@ -302,11 +304,6 @@ public final class CodexSessionClient implements AutoCloseable {
         pendingServerHandles.clear(); answeredServerHandles.clear();
         notifications.close(); subscribers.forEach(ProtocolBuffer::close);
         failPending(new IOException("Соединение Codex закрыто."));
-        List<ProcessHandle> descendants = process.descendants().toList();
-        descendants.forEach(ProcessHandle::destroy);
-        process.destroy();
-        try { if (!process.waitFor(500, TimeUnit.MILLISECONDS)) { process.destroyForcibly(); process.waitFor(2, TimeUnit.SECONDS); } }
-        catch (InterruptedException e) { process.destroyForcibly(); Thread.currentThread().interrupt(); }
-        descendants.forEach(child -> { if (child.isAlive()) child.destroyForcibly(); });
+        termination.stop();
     }
 }

@@ -8,10 +8,28 @@ import static org.junit.jupiter.api.Assertions.*;
 @org.junit.jupiter.api.Timeout(10)
 class CodexSessionClientTest {
     private CodexSessionClient connection() throws Exception {
+        return connection(java.nio.file.Path.of("."));
+    }
+    private CodexSessionClient connection(java.nio.file.Path directory) throws Exception {
         return new CodexSessionClient(java.util.List.of(
                 java.nio.file.Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                 "-cp", System.getProperty("fixture.classes"), RpcFixture.class.getName(), "rpc"),
-                java.nio.file.Path.of("."), () -> false);
+                directory, () -> false);
+    }
+    @Test void interruptedCloseReapsProcessBeforeReleasingWorkingDirectory(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        for (int i = 0; i < 6; i++) {
+            var cwd = java.nio.file.Files.createDirectory(directory.resolve("client-" + i));
+            try (var client = connection(cwd)) {
+                long pid = client.call("fixture/pid", new com.google.gson.JsonObject()).get("pid").getAsLong();
+                Thread.currentThread().interrupt();
+                try { client.close(); assertTrue(Thread.currentThread().isInterrupted()); }
+                finally { Thread.interrupted(); }
+                assertFalse(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false));
+            }
+            // No retry: on Windows this fails if close returns before OS cwd cleanup.
+            java.nio.file.Files.delete(cwd);
+        }
     }
     @Test void lineLimitIsEnforcedBeforeReadingAnUnboundedServerLine() throws Exception {
         var consumed = new java.util.concurrent.atomic.AtomicInteger();

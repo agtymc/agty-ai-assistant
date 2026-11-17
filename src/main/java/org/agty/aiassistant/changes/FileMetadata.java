@@ -187,7 +187,11 @@ public final class FileMetadata {
                 if (Native.getLastError() == 2) return ""; // FILESEC_ACL property absent, after successful statx_np
                 throw nativeError("Чтение FILESEC_ACL");
             }
-            acl = reference.getValue(); if (acl == null) return "";
+            // FILESEC_ACL returns an owned acl_copy_int_native copy, except the non-owning
+            // _FILESEC_REMOVE_ACL sentinel (1); FILESEC_ACL_RAW would instead be borrowed.
+            acl = reference.getValue();
+            if (acl == null) return "";
+            if (Pointer.nativeValue(acl) == 1) { acl = null; return ""; }
             var length = new NativeLongByReference();
             text = library.getFunction("acl_to_text").invokePointer(new Object[]{acl, length});
             long size = length.getValue().longValue();

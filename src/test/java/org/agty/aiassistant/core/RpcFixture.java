@@ -102,6 +102,9 @@ public final class RpcFixture {
                     event("item/completed", "\"turnId\":\"turn-1\",\"item\":{\"id\":\"answer\",\"type\":\"agentMessage\",\"text\":\"Approved\"}");
                     event("turn/completed", "\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}");
                 }
+                else if (line.contains("\"fixture/pid\"")) {
+                    emit("{\"id\":" + id + ",\"result\":{\"pid\":" + ProcessHandle.current().pid() + "}}");
+                }
                 else if (line.contains("\"fixture/first\"") || line.contains("\"fixture/second\"")) {
                     if (line.contains("fixture/first")) heldId = id; else secondId = id;
                     if (heldId != null && secondId != null) {

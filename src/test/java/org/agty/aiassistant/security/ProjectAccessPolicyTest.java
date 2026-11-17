@@ -116,8 +116,10 @@ class ProjectAccessPolicyTest {
     @Test void leadingAndEscapedTrailingSpacesRemainPartOfIgnorePatterns() throws Exception {
         Files.writeString(root.resolve(".gitignore"), " secret.txt\nsecret.txt\\ \n #literal.txt\n\\#literal.txt\n\\!literal.txt\n");
         var policy = new ProjectAccessPolicy(root);
-        for (String name : List.of(" secret.txt", "secret.txt ", " #literal.txt", "#literal.txt", "!literal.txt"))
+        for (String name : List.of(" secret.txt", "secret.txt ", " #literal.txt", "#literal.txt", "!literal.txt")) {
+            if (java.io.File.separatorChar == '\\' && name.endsWith(" ")) continue; // WindowsPath rejects this name before policy evaluation.
             assertFalse(policy.path(Path.of(name), false).allowed(), name);
+        }
         assertTrue(policy.path(Path.of("secret.txt"), false).allowed());
     }
     @Test void gitPosixCharacterClassesAndUnixBackslashesDoNotBypassExclusions() throws Exception {
