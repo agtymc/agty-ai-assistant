@@ -84,6 +84,47 @@ class WorkspaceChangesTest {
             assertTrue(changes.changes().isEmpty());
         }
     }
+    @Test void renameChainWithOverwrittenIntermediateCannotClaimCompleteUndo() throws Exception {
+        Files.writeString(root.resolve("original"), "agent source\n");
+        Files.writeString(root.resolve("intermediate"), "user intermediate\n");
+        try (var changes = WorkspaceChanges.capture(root)) {
+            Files.move(root.resolve("original"), root.resolve("intermediate"), StandardCopyOption.REPLACE_EXISTING);
+            report(changes, "original", "update", "intermediate", "");
+            Files.move(root.resolve("intermediate"), root.resolve("final"));
+            report(changes, "intermediate", "update", "final", ""); changes.finish();
+            assertFalse(changes.changes().getFirst().proven());
+            assertThrows(java.io.IOException.class, () -> changes.rollback(changes.changes()));
+            assertEquals("agent source\n", Files.readString(root.resolve("final")));
+        }
+    }
+    @Test void allRestoreAndRecoveryBackupsAreVerifiedBeforeAnyWrite() throws Exception {
+        Files.writeString(root.resolve("first"), "before\n"); Files.writeString(root.resolve("second"), "before\n");
+        try (var changes = WorkspaceChanges.capture(root)) {
+            for (String name : java.util.List.of("first", "second")) {
+                Files.writeString(root.resolve(name), "after\n");
+                report(changes, name, "update", null, "@@ -1 +1 @@\n-before\n+after\n");
+            }
+            changes.finish();
+            Files.writeString(changes.changes().get(0).after().backup(), "broken recovery");
+            Files.writeString(changes.changes().get(1).before().backup(), "broken restore");
+            assertThrows(java.io.IOException.class, () -> changes.rollback(changes.changes()));
+            assertEquals("after\n", Files.readString(root.resolve("first")));
+            assertEquals("after\n", Files.readString(root.resolve("second")));
+        }
+    }
+    @Test void hardlinksCannotBeSilentlySplitByAutomaticRollback() throws Exception {
+        Files.writeString(root.resolve("original"), "before\n");
+        try { Files.createLink(root.resolve("alias"), root.resolve("original")); }
+        catch (UnsupportedOperationException | java.io.IOException e) { Assumptions.abort("Hardlinks unavailable"); }
+        Assumptions.assumeTrue(Files.getFileStore(root).supportsFileAttributeView("unix"));
+        try (var changes = WorkspaceChanges.capture(root)) {
+            Files.writeString(root.resolve("original"), "after\n");
+            report(changes, "original", "update", null, "@@ -1 +1 @@\n-before\n+after\n"); changes.finish();
+            assertTrue(changes.changes().stream().noneMatch(WorkspaceChanges.Change::proven));
+            assertThrows(java.io.IOException.class, () -> changes.rollback(changes.changes()));
+            assertTrue(Files.isSameFile(root.resolve("original"), root.resolve("alias")));
+        }
+    }
     @Test void hunkRollbackAndFullRollbackKeepCrLfAndNoFinalNewline() throws Exception {
         assertEquals("new\r\n", StrictPatch.apply("old\r\n", "@@ -1 +1 @@\n-old\n+new\n"));
         String patch = "@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n";

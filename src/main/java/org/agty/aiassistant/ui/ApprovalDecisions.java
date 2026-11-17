@@ -10,8 +10,10 @@ final class ApprovalDecisions {
     }
     static List<Choice> choices(JsonObject params, boolean command) {
         List<JsonElement> decisions = new ArrayList<>();
-        if (command && params.has("availableDecisions") && params.get("availableDecisions").isJsonArray())
+        if (command && params.has("availableDecisions") && !params.get("availableDecisions").isJsonNull()) {
+            if (!params.get("availableDecisions").isJsonArray()) return List.of();
             params.getAsJsonArray("availableDecisions").forEach(decisions::add);
+        }
         else {
             for (String value : List.of("accept", "acceptForSession", "decline", "cancel")) decisions.add(new JsonPrimitive(value));
             if (command && params.has("proposedExecpolicyAmendment") && params.get("proposedExecpolicyAmendment").isJsonArray())

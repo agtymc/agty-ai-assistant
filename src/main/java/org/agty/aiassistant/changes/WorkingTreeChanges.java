@@ -15,7 +15,7 @@ public final class WorkingTreeChanges {
     public record Pair(byte[] before, byte[] after) { }
     private record Result(int exit, byte[] output) { }
     private static Result git(Path root, String... args) throws IOException {
-        List<String> command = new ArrayList<>(List.of("git", "-c", "core.quotePath=false")); command.addAll(List.of(args));
+        List<String> command = new ArrayList<>(ReadOnlyGit.command(root, "-c", "core.quotePath=false")); command.addAll(List.of(args));
         var process = new ProcessBuilder(command).directory(root.toFile()).start();
         var stdout = CompletableFuture.supplyAsync(() -> read(process.getInputStream()));
         var stderr = CompletableFuture.supplyAsync(() -> read(process.getErrorStream()));
@@ -34,7 +34,7 @@ public final class WorkingTreeChanges {
         } catch (IOException e) { throw new CompletionException(e); }
     }
     public static List<Entry> list(Path root) throws IOException {
-        var result = git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all");
+        var result = git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all");
         String[] records = new String(result.output, StandardCharsets.UTF_8).split("\u0000");
         List<Entry> entries = new ArrayList<>();
         for (int i = 0; i < records.length; i++) {
@@ -64,7 +64,11 @@ public final class WorkingTreeChanges {
         try (var input = Files.newInputStream(path)) { return read(input); }
     }
     public static Pair contents(Path root, Entry entry) throws IOException {
-        root = root.toAbsolutePath().normalize();
+        // Porcelain paths are always relative to the repository, even when the chat cwd is a subdirectory.
+        String repository = new String(git(root, "rev-parse", "--show-toplevel").output, StandardCharsets.UTF_8);
+        if (repository.endsWith("\n")) repository = repository.substring(0, repository.length() - 1);
+        if (repository.endsWith("\r")) repository = repository.substring(0, repository.length() - 1);
+        root = Path.of(repository).toAbsolutePath().normalize();
         String previous = entry.status == 'R' ? entry.previous : entry.path;
         if (entry.stage == Stage.UNTRACKED) return new Pair(new byte[0], current(root, entry.path, false));
         if (entry.stage == Stage.STAGED) return new Pair(blob(root, "HEAD", previous, entry.status == 'A' || entry.status == 'C'),

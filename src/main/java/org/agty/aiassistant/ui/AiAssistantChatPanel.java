@@ -2,7 +2,6 @@ package org.agty.aiassistant.ui;
 
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.command.CommandProcessor;
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.fileChooser.FileChooser;
 import com.intellij.openapi.fileChooser.FileChooserDescriptor;
@@ -10,11 +9,8 @@ import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.options.ShowSettingsUtil;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.IconLoader;
-import com.intellij.openapi.util.TextRange;
 import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VirtualFile;
-import com.intellij.psi.PsiDocumentManager;
-import com.intellij.psi.codeStyle.CodeStyleManager;
 import com.intellij.ui.components.JBScrollPane;
 import com.intellij.ui.components.JBTextArea;
 import com.intellij.util.ui.JBUI;
@@ -91,7 +87,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
     private final JProgressBar progress = new JProgressBar();
     private final StringBuilder history = new StringBuilder();
     private final java.util.List<ContextItem> pinnedContext = new java.util.ArrayList<>();
-    private java.util.Map<String, String> lastReviewBackup = java.util.Map.of();
+    private org.agty.aiassistant.changes.ManualPatch.Applied lastReviewPatch;
     private String suggestedDiff = "";
     private final org.agty.aiassistant.execution.TaskRunner taskRunner;
     private final AutoCloseable taskSubscription;
@@ -118,6 +114,8 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
     AiAssistantChatPanel(Project project, java.util.List<ChatProviderRegistry.Choice> providers, boolean nativeSessions) {
         super(new BorderLayout(0, 8));
         this.nativeSessions = nativeSessions;
+        for (var component : java.util.List.of(status, sessionLabel, sessionMenuButton, requestOptionsButton)) PlainText.disableHtml(component);
+        providerPicker.setRenderer(PlainText.renderer()); effortPicker.setRenderer(PlainText.renderer());
         this.project = project;
         taskRunner = project.getService(org.agty.aiassistant.execution.ChatExecutionService.class).runner();
         taskSubscription = taskRunner.subscribe(task -> {
@@ -267,7 +265,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
             int index = 0;
             if (requests.size() > 1) {
                 String[] choices = requests.stream().map(entry -> entry.getKey() + " · " + entry.getValue().get("method").getAsString()).toArray(String[]::new);
-                String chosen = (String) JOptionPane.showInputDialog(this, "Выберите ожидающий запрос", "Вопросы и подтверждения", JOptionPane.QUESTION_MESSAGE, null, choices, choices[0]);
+                String chosen = (String) PlainText.choose(this, "Выберите ожидающий запрос", "Вопросы и подтверждения", JOptionPane.QUESTION_MESSAGE, choices, choices[0]);
                 if (chosen == null) return; index = java.util.Arrays.asList(choices).indexOf(chosen);
             }
             var pending = requests.get(index);
@@ -305,7 +303,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
             var selected = (CodexModels.Effort) effortPicker.getSelectedItem();
             if (selected == null) return;
             session.reasoningEffort = selected.value();
-            effortPicker.setToolTipText(selected.description());
+            effortPicker.setToolTipText("Effort: " + selected.description());
             saveSession();
         });
 
@@ -692,7 +690,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         String uid = session.remoteId().isEmpty() ? session.id : session.remoteId();
         String title = session.title.length() > 44 ? session.title.substring(0, 44) + "…" : session.title;
         sessionLabel.setText(title + " · " + uid.substring(0, Math.min(8, uid.length())));
-        sessionLabel.setToolTipText(session.title + " · " + session.providerId + " · " + uid);
+        sessionLabel.setToolTipText("Чат: " + session.title + " · " + session.providerId + " · " + uid);
         sessionMenuButton.setText(title + " ▾"); sessionMenuButton.setToolTipText(sessionLabel.getToolTipText());
         String accessLabel = sessions.unrestrictedAccess ? "Полный доступ" : sessions.interactiveApprovals && sessions.writeAccess ? "Auto" : sessions.writeAccess ? "Запись проекта" : "Чтение";
         requestOptionsButton.setText((session.selectedModel.isBlank() ? "Модель" : session.selectedModel)
@@ -829,8 +827,9 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         close.addActionListener(e -> finishSession()); menu.add(close); menu.addSeparator();
         ButtonGroup group = new ButtonGroup();
         for (var item : sessions.sessions) {
-            JRadioButtonMenuItem entry = new JRadioButtonMenuItem((taskRunner.task(item.id) != null && taskRunner.task(item.id).active() ? taskRunner.task(item.id).status + " · " : item.closed ? "Завершена · " : "") + item.title + " · " + item.providerId + " · "
-                    + (item.remoteId().isEmpty() ? item.id : item.remoteId()), item == session);
+            JRadioButtonMenuItem entry = PlainText.disableHtml(new JRadioButtonMenuItem());
+            entry.setSelected(item == session); entry.setText((taskRunner.task(item.id) != null && taskRunner.task(item.id).active() ? taskRunner.task(item.id).status + " · " : item.closed ? "Завершена · " : "") + item.title + " · " + item.providerId + " · "
+                    + (item.remoteId().isEmpty() ? item.id : item.remoteId()));
             entry.putClientProperty("html.disable", true);
             entry.setActionCommand(item.id); entry.addActionListener(e -> selectSession(item));
             group.add(entry); menu.add(entry);
@@ -910,7 +909,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
                     .orElseGet(() -> metadata.efforts().stream().filter(item -> item.value().equals(metadata.defaultEffort())).findFirst().orElse(metadata.efforts().getFirst()));
             effortPicker.setSelectedItem(chosen);
             session.reasoningEffort = chosen.value();
-            effortPicker.setToolTipText(chosen.description());
+            effortPicker.setToolTipText("Effort: " + chosen.description());
         }
         effortPicker.setVisible(available);
         effortPicker.setEnabled(available && active == null && !readingSession);
@@ -1058,12 +1057,12 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         if (queue) {
             var target = session;
             try {
-                saveSession(); taskRunner.enqueue(target, () -> provider.newRequest(options.withSession(target.remoteId())), rootPath, prompt, question, provider.name(), writeAccess || unrestrictedAccess);
+                saveSession(); taskRunner.enqueue(target, () -> org.agty.aiassistant.context.ContextGuard.protect(provider.newRequest(options.withSession(target.remoteId())), requestContext.items()), rootPath, prompt, question, provider.name(), writeAccess || unrestrictedAccess);
                 input.setText(""); status.setText("Сообщение добавлено в очередь");
             } catch (Exception e) { status.setText(e.getMessage()); }
             return;
         }
-        try { run = provider.newRequest(options); }
+        try { run = org.agty.aiassistant.context.ContextGuard.protect(provider.newRequest(options), requestContext.items()); }
         catch (RuntimeException e) { status.setText(e.getMessage()); return; }
         rememberPrompt(question);
         String requestId = UUID.randomUUID().toString();
@@ -1110,7 +1109,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
 
     private void showContextPreview() {
         if (project.getBasePath() == null) { status.setText("Откройте локальный проект."); return; }
-        var model = new DefaultListModel<String>(); var sources = new JList<>(model);
+        var model = new DefaultListModel<String>(); var sources = new JList<>(model); sources.setCellRenderer(PlainText.renderer());
         sources.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         JTextArea preview = new JTextArea(24, 60); preview.setEditable(false); preview.setLineWrap(false);
         var automatic = new java.util.ArrayList<ContextItem>();
@@ -1205,13 +1204,22 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         final ProjectAccessPolicy policy;
         try { policy = new ProjectAccessPolicy(root); }
         catch (RuntimeException e) { status.setText(e.getMessage()); return; }
+        var target = session;
         status.setText("Собираю Git diff…");
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
             CollectedContext collected = ProjectContextCollector.gitDiff(root, policy);
             ApplicationManager.getApplication().invokeLater(() -> {
-                if (!disposed && !project.isDisposed()) addCollectedContext(collected);
+                if (!disposed && !project.isDisposed()) addCollectedContext(target, collected);
             });
         });
+    }
+
+    void addCollectedContext(ChatSessions.Session target, CollectedContext collected) {
+        if (target != session) {
+            status.setText("Контекст подготовлен для другого чата. Повторите добавление в нужном чате.");
+            return;
+        }
+        addCollectedContext(collected);
     }
 
     private JPopupMenu contextSourceMenu() {
@@ -1235,7 +1243,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
             return;
         }
         for (ContextItem item : collected.items()) {
-            pinnedContext.removeIf(existing -> existing.location().equals(item.location()));
+            pinnedContext.removeIf(existing -> existing.title().equals(item.title()) && existing.location().equals(item.location()));
             pinnedContext.add(item);
         }
         includeContext.setSelected(true);
@@ -1262,24 +1270,41 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         inputScroll.setPreferredSize(JBUI.size(820, 460));
         int entered = JOptionPane.showConfirmDialog(this, inputScroll, "Unified diff для review", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
         if (entered != JOptionPane.OK_OPTION || input.getText().isBlank()) return;
-        reviewAndApplyDiff(input.getText(), Path.of(project.getBasePath()));
+        reviewAndApplyDiff(input.getText(), workingRoot());
     }
 
     private void reviewAndApplyDiff(String diff, Path root) {
         final ProjectAccessPolicy policy;
         try { policy = new ProjectAccessPolicy(root); }
         catch (RuntimeException e) { status.setText(e.getMessage()); return; }
-        ChangeSet skeleton = ChangeSet.fromUnifiedDiff(diff, java.util.Map.of());
+        final ChangeSet skeleton;
+        try { skeleton = ChangeSet.fromUnifiedDiff(diff, java.util.Map.of()); }
+        catch (IllegalArgumentException e) { status.setText(e.getMessage()); return; }
         if (skeleton.isEmpty()) { status.setText("Unified diff не содержит файлов."); return; }
         java.util.Map<String, String> originals = new java.util.LinkedHashMap<>();
+        long originalCharacters = 0;
         for (ChangeSet.FileChange file : skeleton.files()) {
             Path path = root.resolve(file.path()).normalize();
             ProjectAccessPolicy.Verdict verdict = policy.path(path, true);
             if (!verdict.allowed()) { status.setText(verdict.message()); return; }
-            try { originals.put(file.path(), Files.exists(path) ? Files.readString(path) : ""); }
+            try {
+                String original = "";
+                if (Files.exists(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                    byte[] bytes;
+                    try (var stream = Files.newInputStream(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) { bytes = stream.readNBytes(16 * 1024 * 1024 + 1); }
+                    if (bytes.length > 16 * 1024 * 1024) throw new java.io.IOException("Ручной review ограничен 16 MiB на файл.");
+                    original = java.nio.charset.StandardCharsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(bytes)).toString();
+                }
+                originals.put(file.path(), original);
+            }
             catch (Exception e) { status.setText("Не удалось прочитать " + file.path() + ": " + e.getMessage()); return; }
         }
-        ChangeSet changeSet = ChangeSet.fromUnifiedDiff(diff, originals);
+        final ChangeSet changeSet;
+        try {
+            changeSet = ChangeSet.fromUnifiedDiff(diff, originals);
+            // Context validation must happen before showing a misleading conflict-free preview.
+            for (var file : changeSet.files()) file.afterText();
+        } catch (RuntimeException e) { status.setText("Patch не соответствует исходным файлам: " + e.getMessage()); return; }
         java.util.List<String> conflicts = changeSet.conflicts(originals);
         java.util.Set<Integer> selectedHunks;
         try { selectedHunks = selectHunks(changeSet); }
@@ -1323,84 +1348,67 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
     }
 
     private void applyChangeSet(Path root, ProjectAccessPolicy policy, ChangeSet changeSet, java.util.Set<Integer> selectedHunks) {
-        try {
-            java.util.Map<String, String> backup = new java.util.LinkedHashMap<>();
-            int[] appliedFiles = {0};
-            CommandProcessor.getInstance().executeCommand(project, () -> ApplicationManager.getApplication().runWriteAction(() -> {
-                for (ChangeSet.FileChange file : changeSet.files()) {
-                    if (!selectedHunks.isEmpty() && file.hunks().stream().noneMatch(hunk -> selectedHunks.contains(hunk.id()))) continue;
-                    Path path = root.resolve(file.path()).normalize();
-                    ProjectAccessPolicy.Verdict verdict = policy.path(path, true);
-                    verdict.requireAllowed();
-                    String current;
-                    try { current = Files.exists(path) ? Files.readString(path) : ""; }
-                    catch (Exception e) { throw new IllegalStateException("Не удалось прочитать " + file.path(), e); }
-                    if (file.conflictsWith(current)) throw new IllegalStateException("Файл изменился после review: " + file.path());
-                    backup.put(file.path(), current);
-                    Document document = writeFile(path, file.afterText(selectedHunks));
-                    if (document != null) {
-                        formatChangedRanges(document, file, selectedHunks);
-                        FileDocumentManager.getInstance().saveDocument(document);
-                    }
-                    appliedFiles[0]++;
-                }
-            }), "Apply AI ChangeSet", null);
-            lastReviewBackup = java.util.Map.copyOf(backup);
-            undoReviewButton.setEnabled(!lastReviewBackup.isEmpty());
+        var paths = changeSet.files().stream()
+                .filter(file -> selectedHunks.isEmpty() || file.hunks().stream().anyMatch(hunk -> selectedHunks.contains(hunk.id())))
+                .map(file -> root.resolve(file.path()).normalize()).toList();
+        runManualPatch(root, paths, () -> {
+            var currentPolicy = new ProjectAccessPolicy(root);
+            currentPolicy.request(true).requireAllowed();
+            for (Path path : paths) currentPolicy.path(path, true).requireAllowed();
+            lastReviewPatch = org.agty.aiassistant.changes.ManualPatch.apply(root, changeSet, selectedHunks);
+            undoReviewButton.setEnabled(lastReviewPatch.size() > 0);
             suggestedDiff = "";
-            com.intellij.openapi.vfs.VirtualFileManager.getInstance().asyncRefresh(null);
-            status.setText("ChangeSet применён: файлов " + appliedFiles[0]);
-        } catch (RuntimeException e) {
-            status.setText("ChangeSet не применён: " + e.getMessage());
-        }
+            status.setText("Ручной patch применён: файлов " + lastReviewPatch.size());
+        });
     }
 
-    private Document writeFile(Path path, String text) {
-        try {
-            Files.createDirectories(path.getParent());
-            VirtualFile file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path);
-            if (file != null) {
-                var document = FileDocumentManager.getInstance().getDocument(file);
-                if (document != null) {
-                    document.setText(text);
-                    FileDocumentManager.getInstance().saveDocument(document);
-                    return document;
-                }
-            }
-            Files.writeString(path, text);
-            return null;
-        } catch (Exception e) {
-            throw new IllegalStateException("Не удалось записать " + path.getFileName(), e);
-        }
+    @FunctionalInterface private interface ManualPatchOperation { void run() throws Exception; }
+    private void runManualPatch(Path root, java.util.List<Path> paths, ManualPatchOperation operation) {
+        status.setText("Проверка ручного patch…");
+        ApplicationManager.getApplication().executeOnPooledThread(() -> {
+            try {
+                taskRunner.withWorkspaceLock(root, () -> {
+                    var failure = new java.util.concurrent.atomic.AtomicReference<Exception>();
+                    ApplicationManager.getApplication().invokeAndWait(() -> ApplicationManager.getApplication().runWriteAction(() -> {
+                        try {
+                            if (disposed || project.isDisposed()) throw new IllegalStateException("Панель закрыта; patch не применён.");
+                            requireSavedPatchDocuments(paths);
+                            operation.run();
+                            for (Path path : paths) LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path);
+                        } catch (Exception e) { failure.set(e); }
+                    }));
+                    if (failure.get() != null) throw failure.get();
+                });
+            } catch (Exception e) {
+                ApplicationManager.getApplication().invokeLater(() -> { if (!disposed) status.setText("Ручной patch: " + e.getMessage()); });
+            } finally { com.intellij.openapi.vfs.VirtualFileManager.getInstance().asyncRefresh(null); }
+        });
     }
 
-    private void formatChangedRanges(Document document, ChangeSet.FileChange file, java.util.Set<Integer> selectedHunks) {
-        if (document.getLineCount() == 0) return;
-        PsiDocumentManager.getInstance(project).commitDocument(document);
-        var psi = PsiDocumentManager.getInstance(project).getPsiFile(document);
-        if (psi == null) return;
-        java.util.List<TextRange> ranges = new java.util.ArrayList<>();
-        for (ChangeSet.Hunk hunk : file.hunks()) {
-            if (selectedHunks != null && !selectedHunks.isEmpty() && !selectedHunks.contains(hunk.id())) continue;
-            int startLine = Math.max(0, hunk.newStart() - 1);
-            int endLine = Math.min(document.getLineCount() - 1, startLine + Math.max(0, hunk.newCount() - 1));
-            int start = document.getLineStartOffset(Math.min(startLine, document.getLineCount() - 1));
-            int end = document.getLineEndOffset(Math.max(startLine, endLine));
-            ranges.add(new TextRange(start, end));
+    static void requireSavedPatchDocuments(java.util.List<Path> paths) throws java.io.IOException {
+        var physical = new java.util.HashSet<Path>();
+        for (Path path : paths) physical.add(org.agty.aiassistant.changes.WorkspaceChanges.canonical(path));
+        var documents = FileDocumentManager.getInstance();
+        for (Document document : documents.getUnsavedDocuments()) {
+            VirtualFile file = documents.getFile(document);
+            if (file != null && file.isInLocalFileSystem()
+                    && physical.contains(org.agty.aiassistant.changes.WorkspaceChanges.canonical(file.toNioPath())))
+                throw new IllegalStateException("Есть несохранённые правки. Сохраните их и повторите review; автоматическая запись запрещена.");
         }
-        if (!ranges.isEmpty()) CodeStyleManager.getInstance(project).reformatText(psi, ranges);
     }
 
     private void undoLastReview() {
-        if (project.getBasePath() == null || lastReviewBackup.isEmpty()) return;
-        Path root = workingRoot();
-        java.util.Map<String, String> backup = lastReviewBackup;
-        CommandProcessor.getInstance().executeCommand(project, () -> ApplicationManager.getApplication().runWriteAction(() -> {
-            for (var entry : backup.entrySet()) writeFile(root.resolve(entry.getKey()).normalize(), entry.getValue());
-        }), "Undo AI ChangeSet", null);
-        lastReviewBackup = java.util.Map.of();
-        undoReviewButton.setEnabled(false);
-        status.setText("Последний ChangeSet откачен.");
+        var patch = lastReviewPatch;
+        if (patch == null) return;
+        if (Messages.showYesNoDialog(project, "Отменить ручной patch в " + patch.root()
+                + "? Созданные этим patch файлы будут удалены. При последующих правках откат будет запрещён.",
+                "Откат ручного patch", Messages.getQuestionIcon()) != Messages.YES) return;
+        runManualPatch(patch.root(), patch.paths(), () -> {
+            patch.undo();
+            if (lastReviewPatch == patch) lastReviewPatch = null;
+            undoReviewButton.setEnabled(lastReviewPatch != null);
+            status.setText("Ручной patch отменён.");
+        });
     }
 
     private static String extractUnifiedDiff(String text) {
@@ -1448,7 +1456,7 @@ public final class AiAssistantChatPanel extends JPanel implements Disposable {
         contextButton.setEnabled(!value && !readingSession);
         clearContextButton.setEnabled(!value && !readingSession && !pinnedContext.isEmpty());
         reviewButton.setEnabled(!value && !readingSession);
-        undoReviewButton.setEnabled(!value && !readingSession && !lastReviewBackup.isEmpty());
+        undoReviewButton.setEnabled(!value && !readingSession && lastReviewPatch != null);
         progress.setVisible(value);
         send.setEnabled(!readingSession); send.setVisible(!value);
         refresh.setEnabled(!value);

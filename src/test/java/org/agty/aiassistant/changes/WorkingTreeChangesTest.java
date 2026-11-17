@@ -26,4 +26,32 @@ class WorkingTreeChangesTest {
         }
         assertEquals("worktree\n", Files.readString(root.resolve("name with spaces.txt")));
     }
+    @Test void subdirectoryCwdReadsTheActualRepositoryFile() throws Exception {
+        git("init"); Path nested = Files.createDirectory(root.resolve("nested"));
+        Files.writeString(root.resolve("file"), "root user data\n");
+        Files.writeString(nested.resolve("file"), "nested user data\n");
+        var entries = WorkingTreeChanges.list(nested);
+        for (var entry : entries) {
+            var pair = WorkingTreeChanges.contents(nested, entry);
+            assertArrayEquals(Files.readAllBytes(root.resolve(entry.path())), pair.after());
+        }
+        assertEquals(2, entries.size());
+    }
+    @Test void readOnlyGitViewsDoNotExecuteConfiguredMonitorOrFilters() throws Exception {
+        git("init");
+        Files.writeString(root.resolve(".gitattributes"), "*.txt filter=audit\n");
+        git("config", "filter.audit.clean", "printf called > filter-marker; cat");
+        git("config", "filter.audit.required", "true");
+        Files.writeString(root.resolve("file.txt"), "initial\n"); git("add", "file.txt");
+        assertTrue(Files.exists(root.resolve("filter-marker")), "Fixture must prove the configured clean filter actually executes");
+        Files.delete(root.resolve("filter-marker"));
+        git("config", "filter.audit.process", "printf called > process-marker");
+        git("config", "core.fsmonitor", "printf called > monitor-marker");
+        Files.writeString(root.resolve("file.txt"), "changed contents\n");
+        var entries = WorkingTreeChanges.list(root);
+        for (var entry : entries) WorkingTreeChanges.contents(root, entry);
+        assertFalse(Files.exists(root.resolve("filter-marker")));
+        assertFalse(Files.exists(root.resolve("process-marker")));
+        assertFalse(Files.exists(root.resolve("monitor-marker")));
+    }
 }

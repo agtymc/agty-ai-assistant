@@ -13,6 +13,22 @@ class CodexSessionClientTest {
                 "-cp", System.getProperty("fixture.classes"), RpcFixture.class.getName(), "rpc"),
                 java.nio.file.Path.of("."), () -> false);
     }
+    @Test void lineLimitIsEnforcedBeforeReadingAnUnboundedServerLine() throws Exception {
+        var consumed = new java.util.concurrent.atomic.AtomicInteger();
+        var hostile = new java.io.Reader() {
+            public int read(char[] buffer, int offset, int length) {
+                if (consumed.incrementAndGet() > 33) fail("Read past bounded limit");
+                buffer[offset] = 'x'; return 1;
+            }
+            public void close() { }
+        };
+        assertThrows(java.io.IOException.class, () -> CodexSessionClient.readBoundedLine(hostile, 32));
+        assertEquals(33, consumed.get());
+        var input = new java.io.StringReader("abc\nlast");
+        assertEquals("abc", CodexSessionClient.readBoundedLine(input, 4));
+        assertEquals("last", CodexSessionClient.readBoundedLine(input, 4));
+        assertNull(CodexSessionClient.readBoundedLine(input, 4));
+    }
     @Test void routesOutOfOrderRepliesAndPreservesNotifications() throws Exception {
         try (var client = connection(); var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
             var first = executor.submit(() -> client.call("fixture/first", new com.google.gson.JsonObject()));
@@ -38,14 +54,41 @@ class CodexSessionClientTest {
     @Test void independentPendingRequestsAndResolutionByAnotherClientNeverPermitSecondAnswer() throws Exception {
         try (var client = connection(); var subscription = client.subscribe()) {
             client.call("fixture/pending", new com.google.gson.JsonObject());
-            assertEquals(910, subscription.next().get("id").getAsInt());
-            assertEquals(911, subscription.next().get("id").getAsInt());
+            var first = subscription.next(); var second = subscription.next();
+            assertEquals(910, first.get("id").getAsInt()); assertEquals(911, second.get("id").getAsInt());
+            String firstHandle = CodexSessionClient.serverRequestHandle(first), secondHandle = CodexSessionClient.serverRequestHandle(second);
             client.call("fixture/resolve", new com.google.gson.JsonObject());
             assertEquals("serverRequest/resolved", subscription.next().get("method").getAsString());
             var response = JsonParser.parseString("{\"decision\":\"decline\"}").getAsJsonObject();
-            assertThrows(java.io.IOException.class, () -> client.respond("910", response));
-            client.respond("911", response);
-            assertThrows(java.io.IOException.class, () -> client.respond("911", response));
+            assertThrows(java.io.IOException.class, () -> client.respond(firstHandle, response));
+            client.respond(secondHandle, response);
+            assertThrows(java.io.IOException.class, () -> client.respond(secondHandle, response));
+        }
+    }
+    @Test void staleApprovalCannotAnswerReusedRpcIdInAnotherConnectionOrSameConnection() throws Exception {
+        try (var old = connection(); var oldSubscription = old.subscribe(); var replacement = connection(); var replacementSubscription = replacement.subscribe()) {
+            old.call("fixture/pending", new com.google.gson.JsonObject());
+            String stale = CodexSessionClient.serverRequestHandle(oldSubscription.next()); oldSubscription.next();
+            replacement.call("fixture/pending", new com.google.gson.JsonObject());
+            String fresh = CodexSessionClient.serverRequestHandle(replacementSubscription.next()); replacementSubscription.next();
+            var approve = JsonParser.parseString("{\"decision\":\"accept\"}").getAsJsonObject();
+            assertNotEquals(stale, fresh);
+            assertThrows(java.io.IOException.class, () -> replacement.respond(stale, approve));
+            replacement.respond(fresh, approve);
+            old.call("fixture/resolve", new com.google.gson.JsonObject()); oldSubscription.next();
+            old.call("fixture/reuse-resolved", new com.google.gson.JsonObject());
+            String reused = CodexSessionClient.serverRequestHandle(oldSubscription.next());
+            assertNotEquals(stale, reused);
+            assertThrows(java.io.IOException.class, () -> old.respond(stale, approve)); old.respond(reused, approve);
+        }
+    }
+    @Test void pendingRequestFloodFailsClosedWithoutGrantingPermission() throws Exception {
+        try (var client = connection(); var subscription = client.subscribe()) {
+            client.call("fixture/burst-pending", new com.google.gson.JsonObject());
+            assertTimeoutPreemptively(java.time.Duration.ofSeconds(3), () -> {
+                while (client.alive()) Thread.sleep(10);
+            });
+            assertThrows(java.io.IOException.class, () -> client.respond("1000", JsonParser.parseString("{\"decision\":\"accept\"}").getAsJsonObject()));
         }
     }
     @Test void historyLoadsPagesWithoutCollidingItemIdsAcrossTurns() throws Exception {

@@ -61,6 +61,12 @@ public final class ProjectContextCollector {
                 notes.add("Контекст без пути пропущен: " + item.title());
                 continue;
             }
+            // Old combined diffs have no trustworthy per-file provenance. Re-add them
+            // using the per-file collector so new ignore rules can be enforced.
+            if (item.path().equals(".git-diff.patch") || item.path().equals(".git-diff-staged.patch")) {
+                notes.add("Повторно добавьте Git diff: прежний контекст не содержит проверяемых путей файлов.");
+                continue;
+            }
             ProjectAccessPolicy.Verdict verdict = policy.path(root.resolve(item.path()), false);
             if (!verdict.allowed()) {
                 notes.add(verdict.message());
@@ -94,8 +100,7 @@ public final class ProjectContextCollector {
             notes.add(verdict.message());
             return new CollectedContext(List.copyOf(items), List.copyOf(notes));
         }
-        String relative = root.toAbsolutePath().normalize().relativize(filePath.toAbsolutePath().normalize())
-                .toString().replace('\\', '/');
+        String relative = relative(root, filePath);
         var selection = editor.getSelectionModel();
         int start = selection.hasSelection() ? selection.getSelectionStart() : 0;
         int end = selection.hasSelection() ? selection.getSelectionEnd() : document.getTextLength();
@@ -155,7 +160,11 @@ public final class ProjectContextCollector {
             return;
         }
         String text;
-        try { text = Files.readString(filePath); }
+        try (var reader = Files.newBufferedReader(filePath)) {
+            char[] buffer = new char[MAX_CONTEXT_CHARS + 1]; int size = 0, read;
+            while (size < buffer.length && (read = reader.read(buffer, size, buffer.length - size)) >= 0) size += read;
+            text = new String(buffer, 0, size);
+        }
         catch (IOException e) {
             notes.add("Не удалось прочитать файл: " + relative(root, filePath));
             return;
@@ -168,55 +177,56 @@ public final class ProjectContextCollector {
     }
 
     private static void addGitDiff(Path root, ProjectAccessPolicy policy, boolean staged, List<ContextItem> items, List<String> notes) {
-        List<String> names = git(root, staged ? List.of("diff", "--cached", "--name-only") : List.of("diff", "--name-only"), notes);
+        var listing = new ArrayList<>(List.of("diff", "--relative", "--ignore-submodules=all", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z"));
+        if (staged) listing.add("--cached");
+        String names = git(root, listing, notes);
         if (names.isEmpty()) return;
-        List<String> allowed = new ArrayList<>();
-        for (String name : names) {
-            if (name.isBlank()) continue;
+        for (String name : names.split("\u0000")) {
+            if (name.isEmpty()) continue;
             ProjectAccessPolicy.Verdict verdict = policy.path(root.resolve(name), false);
-            if (verdict.allowed()) allowed.add(name);
-            else notes.add(verdict.message());
+            if (!verdict.allowed()) { notes.add(verdict.message()); continue; }
+            List<String> command = new ArrayList<>(List.of("diff", "--relative", "--ignore-submodules=all", "--no-ext-diff", "--no-textconv", "--no-renames"));
+            if (staged) command.add("--cached");
+            command.add("--"); command.add(":(literal)" + name);
+            String diff = git(root, command, notes);
+            if (diff.isBlank()) continue;
+            if (diff.length() > MAX_CONTEXT_CHARS) {
+                notes.add("Git diff больше 256 КиБ и не был добавлен: " + name); continue;
+            }
+            items.add(new ContextItem(staged ? "Git diff staged" : "Git diff unstaged", name, 0, 0, diff));
         }
-        if (allowed.isEmpty()) return;
-        List<String> command = new ArrayList<>();
-        command.add("diff");
-        if (staged) command.add("--cached");
-        command.add("--");
-        command.addAll(allowed);
-        String diff = String.join("\n", git(root, command, notes));
-        if (diff.isBlank()) return;
-        if (diff.length() > MAX_CONTEXT_CHARS) {
-            notes.add((staged ? "Staged" : "Unstaged") + " Git diff больше 256 КиБ и не был добавлен.");
-            return;
-        }
-        items.add(new ContextItem(staged ? "Git diff staged" : "Git diff unstaged",
-                staged ? ".git-diff-staged.patch" : ".git-diff.patch", 1, diff.split("\n", -1).length, diff));
     }
 
-    private static List<String> git(Path root, List<String> args, List<String> notes) {
-        List<String> command = new ArrayList<>();
-        command.add("git");
-        command.add("-C");
-        command.add(root.toString());
-        command.addAll(args);
+    private static String git(Path root, List<String> args, List<String> notes) {
+        Process process = null;
         try {
-            Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+            var command = org.agty.aiassistant.changes.ReadOnlyGit.command(root, args.toArray(String[]::new));
+            process = new ProcessBuilder(command).directory(root.toFile()).redirectErrorStream(true).start();
+            Process child = process;
+            var outputTask = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                try {
+                    byte[] bytes = child.getInputStream().readNBytes(MAX_CONTEXT_CHARS * 4 + 1);
+                    if (bytes.length > MAX_CONTEXT_CHARS * 4) { child.destroyForcibly(); throw new IOException("Вывод Git превышает лимит контекста."); }
+                    return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+                } catch (IOException e) { throw new java.util.concurrent.CompletionException(e); }
+            });
             boolean finished = process.waitFor(Duration.ofSeconds(10).toMillis(), TimeUnit.MILLISECONDS);
-            String output = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
             if (!finished) {
                 process.destroyForcibly();
                 notes.add("Git diff не был добавлен: команда превысила 10 секунд.");
-                return List.of();
+                return "";
             }
+            String output = outputTask.get(2, TimeUnit.SECONDS);
             if (process.exitValue() != 0) {
                 notes.add("Git diff недоступен: " + output.strip());
-                return List.of();
+                return "";
             }
-            return output.isBlank() ? List.of() : output.lines().toList();
+            return output;
         } catch (Exception e) {
+            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
             notes.add("Git diff недоступен: " + e.getMessage());
-            return List.of();
-        }
+            return "";
+        } finally { if (process != null && process.isAlive()) process.destroyForcibly(); }
     }
 
     private static void appendHighlight(Document document, HighlightInfo info, StringBuilder text) {
@@ -231,8 +241,8 @@ public final class ProjectContextCollector {
     }
 
     private static String relative(Path root, Path filePath) {
-        return root.toAbsolutePath().normalize().relativize(filePath.toAbsolutePath().normalize())
-                .toString().replace('\\', '/');
+        Path relative = root.toAbsolutePath().normalize().relativize(filePath.toAbsolutePath().normalize());
+        return relative.getFileSystem().getSeparator().equals("\\") ? relative.toString().replace('\\', '/') : relative.toString();
     }
 
     private ProjectContextCollector() {}

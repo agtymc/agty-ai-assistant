@@ -71,44 +71,64 @@ public final class WorkspaceChanges implements AutoCloseable {
     }
     private String relative(Path path) { return root.relativize(path.toAbsolutePath().normalize()).toString(); }
     private Path safe(String name) throws IOException {
+        if (Files.isSymbolicLink(root) || !root.toRealPath().equals(root)) throw new IOException("Рабочий каталог заменён ссылкой; автоматическая запись запрещена.");
         Path path = root.resolve(name).toAbsolutePath().normalize();
         if (!path.startsWith(root) || path.equals(root)) throw new IOException("Путь вне рабочего каталога.");
-        for (Path part : root.relativize(path)) if (part.toString().equals(".git")) throw new IOException("Автоматический откат метаданных Git запрещён.");
+        for (Path part : root.relativize(path)) if (part.toString().equalsIgnoreCase(".git")) throw new IOException("Автоматический откат метаданных Git запрещён.");
         Path parent = path;
         while (parent != null && !parent.equals(root)) {
-            if (Files.isSymbolicLink(parent)) throw new IOException("Откат через symlink запрещён."); parent = parent.getParent();
+            if (Files.isSymbolicLink(parent) || Files.exists(parent, LinkOption.NOFOLLOW_LINKS) && !parent.toRealPath().startsWith(root))
+                throw new IOException("Откат через ссылку вне рабочего каталога запрещён."); parent = parent.getParent();
         }
         return path;
     }
     private Version version(Path file) throws IOException {
         if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) return new Version(false, null, "", true);
         if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) return new Version(true, null, "", false);
-        String hash = hash(file); long size = Files.size(file);
-        if (stored + size > MAX_BYTES) return new Version(true, null, hash, false);
-        Path copy = Files.createTempFile(stash, "version-", ".bin"); Files.copy(file, copy, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
-        stored += size;
-        return new Version(true, copy, hash, hash.equals(hash(copy)) && hash.equals(hash(file)), mode(file));
-    }
-    private static String mode(Path path) throws IOException {
-        try { return new java.util.TreeSet<>(Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS)).toString(); }
-        catch (UnsupportedOperationException e) {
-            try { var attributes = Files.readAttributes(path, java.nio.file.attribute.DosFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-                return "dos:" + attributes.isReadOnly() + ":" + attributes.isHidden() + ":" + attributes.isSystem();
-            } catch (UnsupportedOperationException unsupported) { return ""; }
+        Path copy = null; String hash = "";
+        try {
+            try {
+                if (((Number) Files.getAttribute(file, "unix:nlink", LinkOption.NOFOLLOW_LINKS)).longValue() > 1)
+                    return new Version(true, null, "", false);
+            } catch (UnsupportedOperationException ignored) { }
+            long size = Files.size(file);
+            if (size > MAX_BYTES - stored) return new Version(true, null, "", false);
+            hash = hash(file);
+            copy = Files.createTempFile(stash, "version-", ".bin");
+            copyBounded(file, copy, MAX_BYTES - stored);
+            stored += Files.size(copy);
+            return new Version(true, copy, hash, hash.equals(hash(copy)) && hash.equals(hash(file)) && mode(copy).equals(mode(file)), mode(file));
+        } catch (IOException e) {
+            // Unsupported ACL/streams/privileged metadata remove only this file's right to automatic undo.
+            // A project can still run a task and show other, fully captured files.
+            if (copy != null) try { Files.deleteIfExists(copy); } catch (IOException ignored) { }
+            return new Version(Files.exists(file, LinkOption.NOFOLLOW_LINKS), null, hash, false);
         }
     }
+    private static String mode(Path path) throws IOException { return FileMetadata.fingerprint(path); }
     private static String hash(Path path) throws IOException {
         try {
             var digest = MessageDigest.getInstance("SHA-256");
-            try (var input = Files.newInputStream(path)) { byte[] buffer = new byte[65536]; int count; while ((count = input.read(buffer)) >= 0) digest.update(buffer, 0, count); }
+            try (var input = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
+                byte[] buffer = new byte[65536]; int count; long total = 0;
+                while ((count = input.read(buffer)) >= 0) {
+                    total += count; if (total > MAX_BYTES) throw new IOException("Файл превышает лимит снимка 256 MiB.");
+                    digest.update(buffer, 0, count);
+                }
+            }
             return HexFormat.of().formatHex(digest.digest());
         } catch (NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
     }
     public static byte[] bytes(Version version) throws IOException {
         if (!version.exists) return new byte[0];
         if (version.backup == null) throw new IOException("Полная исходная версия не сохранена.");
-        if (!hash(version.backup).equals(version.sha256)) throw new IOException("Сохранённая версия повреждена; автоматический откат запрещён.");
-        return Files.readAllBytes(version.backup);
+        byte[] value;
+        try (var input = Files.newInputStream(version.backup, LinkOption.NOFOLLOW_LINKS)) { value = readBounded(input, (int) MAX_BYTES); }
+        try {
+            if (!HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value)).equals(version.sha256))
+                throw new IOException("Сохранённая версия повреждена; автоматический откат запрещён.");
+        } catch (NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
+        return value;
     }
     private static String text(Version version) throws IOException {
         return StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes(version))).toString();
@@ -126,6 +146,9 @@ public final class WorkspaceChanges implements AutoCloseable {
                 String patch = change.get("diff").getAsString();
                 String origin = sourceForTarget.getOrDefault(source, source);
                 if (!source.equals(target) && sourceForTarget.containsKey(source)) {
+                    // An overwritten intermediate destination has its own user baseline. A flattened
+                    // A→B→C change cannot restore B, so it must never claim a complete reversible change.
+                    if (original(source).exists) unproven.add(target);
                     sourceForTarget.remove(source);
                     String earlier = patches.remove(source); if (earlier != null) patches.put(target, earlier);
                     if (unproven.remove(source)) unproven.add(target);
@@ -175,7 +198,7 @@ public final class WorkspaceChanges implements AutoCloseable {
             try { path = safe(name); } catch (IOException e) { continue; }
             boolean exists = Files.exists(path, LinkOption.NOFOLLOW_LINKS);
             if (exists == before.exists && (!exists || Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
-                    && hash(path).equals(before.sha256) && mode(path).equals(before.mode))) continue;
+                    && Files.size(path) <= MAX_BYTES && hash(path).equals(before.sha256) && (!before.trustworthy || mode(path).equals(before.mode)))) continue;
             Version after = version(path);
             Operation operation = !before.exists ? Operation.CREATE : !after.exists ? Operation.DELETE : Operation.MODIFY;
             changes.add(new Change(name, name, operation, before, after, before, "", false));
@@ -187,10 +210,10 @@ public final class WorkspaceChanges implements AutoCloseable {
         Path after = change.after.exists ? change.after.backup : empty;
         if (before == null || after == null) { Files.deleteIfExists(empty); throw new IOException("Для этого файла не сохранены полные версии."); }
         try {
-            var process = new ProcessBuilder("git", "-c", "core.quotePath=false", "diff", "--no-index", "--no-ext-diff", "--no-textconv", "--", before.toString(), after.toString())
+            var process = new ProcessBuilder(ReadOnlyGit.command(stash, "-c", "core.quotePath=false", "diff", "--no-index", "--no-ext-diff", "--no-textconv", "--", before.toString(), after.toString()))
                     .directory(stash.toFile()).redirectErrorStream(true).start();
             var output = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
-                try { return new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8); }
+                try { return new String(readBounded(process.getInputStream(), 64 * 1024 * 1024), StandardCharsets.UTF_8); }
                 catch (IOException e) { throw new java.util.concurrent.CompletionException(e); }
             });
             try {
@@ -209,10 +232,10 @@ public final class WorkspaceChanges implements AutoCloseable {
         if (index < 0 || index >= hunks.size()) throw new IOException("Фрагмент не найден.");
         String restored = StrictPatch.apply(text(change.after), StrictPatch.reverse(hunks.get(index)));
         Path backup = Files.createTempFile(stash, "partial-", ".bin");
-        Files.copy(change.after.backup, backup, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+        copyBounded(change.after.backup, backup, MAX_BYTES);
         Files.writeString(backup, restored, StandardCharsets.UTF_8);
         Version version = new Version(true, backup, hash(backup), true, change.after.mode);
-        verifyCurrent(change.target, change.after); write(change.target, version);
+        verifyCurrent(change.target, change.after); write(change.target, version, change.after);
         int position = changes.indexOf(change);
         if (version.sha256.equals(change.before.sha256)) changes.remove(position);
         else changes.set(position, new Change(change.source, change.target, change.operation, change.before, version, change.targetBefore, "", true));
@@ -237,30 +260,54 @@ public final class WorkspaceChanges implements AutoCloseable {
                 restore.put(change.source, change.before); current.put(change.source, new Version(false, null, "", true));
             }
         }
+        // Check every recovery copy before the first mutation; a corrupt later backup must not
+        // leave an earlier file reverted merely because recovery also needs a damaged snapshot.
+        for (Version version : restore.values()) if (version.exists) bytes(version);
+        for (Version version : current.values()) if (version.exists) bytes(version);
         List<String> applied = new ArrayList<>();
         try {
             for (var pair : restore.entrySet()) {
-                verifyCurrent(pair.getKey(), current.get(pair.getKey())); write(pair.getKey(), pair.getValue()); applied.add(pair.getKey());
+                verifyCurrent(pair.getKey(), current.get(pair.getKey())); write(pair.getKey(), pair.getValue(), current.get(pair.getKey())); applied.add(pair.getKey());
             }
         } catch (IOException e) {
             for (String name : applied.reversed()) {
-                try { verifyCurrent(name, restore.get(name)); write(name, current.get(name)); } catch (IOException recovery) { e.addSuppressed(recovery); }
+                try { verifyCurrent(name, restore.get(name)); write(name, current.get(name), restore.get(name)); } catch (IOException recovery) { e.addSuppressed(recovery); }
             }
             throw e;
         }
         changes.removeAll(selected);
     }
-    private void write(String name, Version version) throws IOException {
+    private void write(String name, Version version, Version expected) throws IOException {
         Path path = safe(name);
-        if (!version.exists) { Files.deleteIfExists(path); return; }
+        if (!version.exists) { verifyCurrent(name, expected); Files.deleteIfExists(path); return; }
         if (version.backup == null) throw new IOException("Нет сохранённой версии " + name);
         if (!hash(version.backup).equals(version.sha256)) throw new IOException("Повреждена сохранённая версия " + name);
         Files.createDirectories(path.getParent()); Path temporary = Files.createTempFile(path.getParent(), ".agty-rollback-", ".tmp");
         try {
-            Files.copy(version.backup, temporary, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
-            try { Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING); }
-            catch (AtomicMoveNotSupportedException e) { Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING); }
+            copyBounded(version.backup, temporary, MAX_BYTES);
+            if (!hash(temporary).equals(version.sha256) || !version.mode.isEmpty() && !mode(temporary).equals(version.mode))
+                throw new IOException("Сохранённая версия изменилась при копировании; автоматический откат запрещён.");
+            verifyCurrent(name, expected);
+            if (!expected.exists) Files.createLink(path, temporary); // do not clobber a concurrently created user file
+            else Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } finally { Files.deleteIfExists(temporary); }
+    }
+    private static byte[] readBounded(InputStream input, int limit) throws IOException {
+        byte[] value = input.readNBytes(limit + 1);
+        if (value.length > limit) throw new IOException("Результат превышает безопасный лимит " + limit / (1024 * 1024) + " MiB.");
+        return value;
+    }
+    private static void copyBounded(Path source, Path target, long limit) throws IOException {
+        try (var input = Files.newInputStream(source, LinkOption.NOFOLLOW_LINKS);
+             var output = Files.newOutputStream(target, StandardOpenOption.TRUNCATE_EXISTING)) {
+            byte[] buffer = new byte[65536]; int count; long total = 0;
+            while ((count = input.read(buffer)) >= 0) {
+                total += count; if (total > limit) throw new IOException("Снимок превысил лимит 256 MiB.");
+                output.write(buffer, 0, count);
+            }
+        }
+        FileMetadata.copyAccess(source, target);
+        Files.setLastModifiedTime(target, Files.getLastModifiedTime(source, LinkOption.NOFOLLOW_LINKS));
     }
     @Override public void close() throws IOException {
         try (var paths = Files.walk(stash)) { for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path); }

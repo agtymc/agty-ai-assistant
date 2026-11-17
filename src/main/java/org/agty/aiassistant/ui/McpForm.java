@@ -102,17 +102,17 @@ final class McpForm {
         Set<String> required = new HashSet<>(); if (present(schema, "required")) for (var key : schema.getAsJsonArray("required")) required.add(key.getAsString());
         for (var pair : schema.getAsJsonObject("properties").entrySet()) {
             String key = pair.getKey(); var field = pair.getValue().getAsJsonObject(); String type = text(field, "type");
-            JCheckBox include = new JCheckBox((present(field, "title") ? text(field, "title") : key) + (required.contains(key) ? " *" : ""), required.contains(key) || present(field, "default"));
-            include.putClientProperty("html.disable", true); if (required.contains(key)) include.setEnabled(false); form.add(include); included.put(key, include);
+            JCheckBox include = PlainText.checkBox((present(field, "title") ? text(field, "title") : key) + (required.contains(key) ? " *" : ""), required.contains(key) || present(field, "default"));
+            if (required.contains(key)) include.setEnabled(false); form.add(include); included.put(key, include);
             JComponent editor;
             if (type.equals("array")) {
-                var options = choices(field.getAsJsonObject("items")); var list = new JList<>(options.toArray(Choice[]::new));
-                list.setCellRenderer(plainRenderer()); list.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION); list.setVisibleRowCount(Math.min(5, options.size()));
+                var options = choices(field.getAsJsonObject("items")); var list = new JList<Choice>();
+                list.setCellRenderer(plainRenderer()); list.setListData(options.toArray(Choice[]::new)); list.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION); list.setVisibleRowCount(Math.min(5, options.size()));
                 editor = list; form.add(new JScrollPane(list));
                 if (present(field, "default")) for (int i = 0; i < options.size(); i++) for (var value : field.getAsJsonArray("default")) if (options.get(i).value.equals(value.getAsString())) list.addSelectionInterval(i, i);
             } else if (type.equals("boolean")) { editor = new JCheckBox(); ((JCheckBox) editor).setSelected(present(field, "default") && field.get("default").getAsBoolean()); form.add(editor); }
             else if (!choices(field).isEmpty()) {
-                var combo = new JComboBox<>(choices(field).toArray(Choice[]::new)); combo.setRenderer(plainRenderer()); combo.setSelectedIndex(-1);
+                var combo = new JComboBox<Choice>(); combo.setRenderer(plainRenderer()); choices(field).forEach(combo::addItem); combo.setSelectedIndex(-1);
                 if (present(field, "default")) for (int i = 0; i < combo.getItemCount(); i++) if (combo.getItemAt(i).value.equals(field.get("default").getAsString())) combo.setSelectedIndex(i);
                 editor = combo; form.add(editor);
             } else { editor = new JTextField(present(field, "default") ? field.get("default").getAsString() : "", 40); form.add(editor); }
@@ -139,8 +139,6 @@ final class McpForm {
         }
         return null;
     }
-    private static DefaultListCellRenderer plainRenderer() {
-        var renderer = new DefaultListCellRenderer(); renderer.putClientProperty("html.disable", true); return renderer;
-    }
+    private static DefaultListCellRenderer plainRenderer() { return PlainText.renderer(); }
     private McpForm() { }
 }

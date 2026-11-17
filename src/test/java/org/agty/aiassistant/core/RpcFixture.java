@@ -10,18 +10,27 @@ public final class RpcFixture {
     private static final String THREAD = "019e309f-5fe7-7a93-90d0-ce794686cdfd";
     private static final String FORK = "019e309f-5fe7-7a93-90d0-ce794686cdfa";
     private static String currentThread = THREAD;
+    private static String fixtureMode = "";
     private static String heldId;
     private static String secondId;
     private static int threadSequence;
     private static final java.util.Set<String> interrupted = java.util.concurrent.ConcurrentHashMap.newKeySet();
-    private static void emit(String value) { System.out.println(value); System.out.flush(); }
+    private static void emit(String value) {
+        if (value.contains("\"model\":") && value.contains("\"thread\":{") && !value.contains("\"sandbox\":")) {
+            String cwd = Path.of(".").toAbsolutePath().normalize().toString().replace("\\", "\\\\");
+            String type = fixtureMode.equals("review-wide") ? "dangerFullAccess" : "readOnly";
+            value = value.replace("\"result\":{", "\"result\":{\"cwd\":\"" + cwd + "\",\"sandbox\":{\"type\":\"" + type
+                    + "\",\"networkAccess\":" + fixtureMode.equals("review-network") + "},");
+        }
+        System.out.println(value); System.out.flush();
+    }
     private static void event(String method, String fields) {
         emit("{\"method\":\"" + method + "\",\"params\":{\"threadId\":\"" + currentThread + "\"," + fields + "}}");
     }
     public static void main(String[] args) throws Exception {
         System.setOut(new java.io.PrintStream(System.out, true, StandardCharsets.UTF_8));
         System.setErr(new java.io.PrintStream(System.err, true, StandardCharsets.UTF_8));
-        String mode = args[0];
+        String mode = args[0]; fixtureMode = mode;
         try (var input = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
             String line;
             while ((line = input.readLine()) != null) {
@@ -36,7 +45,9 @@ public final class RpcFixture {
                     event("turn/completed", "\"turn\":{\"id\":\"review-1\",\"status\":\"completed\"}");
                 }
                 else if (line.contains("\"thread/compact/start\"")) {
-                    emit("{\"id\":" + id + ",\"result\":{}}"); event("thread/compacted", "\"turnId\":\"compact-1\"");
+                    emit("{\"id\":" + id + ",\"result\":{}}");
+                    if (mode.equals("compact-hang")) java.nio.file.Files.writeString(Path.of("compact-started"), "started");
+                    else event("thread/compacted", "\"turnId\":\"compact-1\"");
                 }
                 else if (line.contains("\"thread/turns/list\"")) {
                     emit("{\"id\":" + id + ",\"result\":{\"data\":[{\"id\":\"observed-turn\",\"status\":\"completed\",\"items\":[{\"id\":\"observed-item\",\"type\":\"agentMessage\",\"text\":\"Observed without turn/start\"}]}]}}");
@@ -47,15 +58,25 @@ public final class RpcFixture {
                             + "\",\"item\":{\"id\":\"same\",\"type\":\"agentMessage\",\"text\":\"" + (second ? "Earlier" : "Latest") + "\"}}],\"nextCursor\":"
                             + (second ? "null" : "\"older\"") + "}}");
                 }
-                else if (mode.equals("multiplex") && line.contains("\"thread/start\"")) {
+                else if (mode.startsWith("multiplex") && line.contains("\"thread/start\"")) {
                     String thread = threadSequence++ == 0 ? THREAD : FORK;
                     emit("{\"id\":" + id + ",\"result\":{\"model\":\"fixture\",\"thread\":{\"id\":\"" + thread + "\"}}}");
-                } else if (mode.equals("multiplex") && (line.contains("\"turn/start\"") || line.contains("\"turn/interrupt\""))) {
+                } else if (mode.startsWith("multiplex") && (line.contains("\"turn/start\"") || line.contains("\"turn/interrupt\""))) {
                     var threadMatch = Pattern.compile("\"threadId\":\"([^\"]+)\"").matcher(line);
                     if (!threadMatch.find()) System.exit(21);
                     String thread = threadMatch.group(1), turn = "turn-" + thread;
                     if (line.contains("turn/interrupt")) {
-                        interrupted.add(thread); emit("{\"id\":" + id + ",\"result\":{}}");
+                        interrupted.add(thread);
+                        if (mode.equals("multiplex-reject")) emit("{\"id\":" + id + ",\"error\":{\"message\":\"Turn already finishing\"}}");
+                        else emit("{\"id\":" + id + ",\"result\":{}}");
+                        Thread.startVirtualThread(() -> {
+                            try {
+                                Thread.sleep(200);
+                                java.nio.file.Files.writeString(Path.of("interrupt-finished-" + thread), "stopped");
+                                emit("{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"" + thread
+                                        + "\",\"turn\":{\"id\":\"" + turn + "\",\"status\":\"interrupted\"}}}");
+                            } catch (Exception e) { throw new RuntimeException(e); }
+                        });
                     } else {
                         emit("{\"id\":" + id + ",\"result\":{\"turn\":{\"id\":\"" + turn + "\"}}}");
                         Thread.startVirtualThread(() -> {
@@ -71,7 +92,7 @@ public final class RpcFixture {
                         });
                     }
                 }
-                else if ((mode.equals("interactive") || mode.equals("write-e2e")) && id.equals("900")) {
+                else if ((mode.equals("interactive") || mode.equals("write-e2e") || mode.equals("reconnect-approval")) && id.equals("900")) {
                     if (!line.contains("\"decision\":\"accept\"")) System.exit(20);
                     event("serverRequest/resolved", "\"requestId\":900");
                     if (mode.equals("write-e2e")) {
@@ -89,9 +110,21 @@ public final class RpcFixture {
                         emit("{\"id\":" + heldId + ",\"result\":{\"value\":1}}");
                     }
                 }
+                else if (line.contains("\"fixture/burst-pending\"")) {
+                    emit("{\"id\":" + id + ",\"result\":{}}");
+                    for (int requestId = 1000; requestId < 1140; requestId++) emit("{\"id\":" + requestId + ",\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"threadId\":\"" + THREAD + "\",\"turnId\":\"turn\",\"itemId\":\"command\",\"startedAtMs\":0}}");
+                }
                 else if (line.contains("\"fixture/pending\"")) {
                     for (int requestId : new int[]{910, 911}) emit("{\"id\":" + requestId + ",\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"threadId\":\"" + THREAD + "\",\"turnId\":\"turn\",\"itemId\":\"command\",\"startedAtMs\":0}}");
                     emit("{\"id\":" + id + ",\"result\":{}}");
+                }
+                else if (line.contains("\"fixture/reuse-resolved\"")) {
+                    emit("{\"id\":910,\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"threadId\":\"" + FORK + "\",\"turnId\":\"other-turn\",\"itemId\":\"other-command\",\"startedAtMs\":0}}");
+                    emit("{\"id\":" + id + ",\"result\":{}}");
+                }
+                else if (mode.equals("reconnect-approval") && line.contains("\"turn/steer\"")) {
+                    java.nio.file.Files.writeString(Path.of(".rpc-reconnect-started"), "started");
+                    emit("{\"id\":" + id + ",\"result\":{}}"); System.exit(7);
                 }
                 else if (line.contains("\"fixture/resolve\"")) {
                     event("serverRequest/resolved", "\"requestId\":910"); emit("{\"id\":" + id + ",\"result\":{}}");
@@ -114,7 +147,8 @@ public final class RpcFixture {
                     }
                     String expected = mode.equals("full") ? "danger-full-access" : (mode.equals("write") || mode.equals("write-e2e")) ? "workspace-write" : "read-only";
                     if (!line.contains("\"sandbox\":\"" + expected + "\"") || !line.contains("\"approvalPolicy\":\"" + ((mode.equals("interactive") || mode.equals("write-e2e")) ? "on-request" : "never") + "\"")) System.exit(8);
-                    String responseModel = mode.equals("mismatch") ? "engine-a" : mode.equals("no-model") ? "" : mode.equals("model") || mode.equals("rerouted") || mode.equals("fork") ? "engine-b" : "fixture";
+                    if (mode.equals("image-swap")) java.nio.file.Files.writeString(Path.of(".aiignore"), "sample.png\n");
+                    String responseModel = mode.equals("mismatch") ? "engine-a" : mode.equals("no-model") ? "" : mode.equals("model") || mode.equals("rerouted") || mode.equals("fork") || mode.equals("image-swap") ? "engine-b" : "fixture";
                     currentThread = mode.equals("fork") ? FORK : THREAD;
                     if (mode.startsWith("reconnect") && line.contains("\"thread/resume\"")) {
                         String snapshot = mode.equals("reconnect-active")
@@ -122,12 +156,21 @@ public final class RpcFixture {
                                 : "\"turns\":[{\"id\":\"turn-1\",\"status\":\"inProgress\",\"items\":[{\"id\":\"answer\",\"type\":\"agentMessage\",\"text\":\"Привет\"}]}]";
                         emit("{\"id\":" + id + ",\"result\":{\"model\":\"fixture\",\"thread\":{\"id\":\"" + currentThread
                                 + "\"," + snapshot + "}}}");
+                        if (mode.equals("reconnect-approval")) {
+                            emit("{\"id\":900,\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"threadId\":\"" + currentThread
+                                    + "\",\"turnId\":\"turn-1\",\"itemId\":\"new-command\",\"command\":\"new operation\",\"startedAtMs\":0}}");
+                            continue;
+                        }
                         event("item/completed", "\"turnId\":\"turn-1\",\"item\":{\"id\":\"answer\",\"type\":\"agentMessage\",\"text\":\"Привет после восстановления\"}");
                         event("turn/completed", "\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}");
                     } else {
                         emit("{\"id\":" + id + ",\"result\":{\"model\":\"" + responseModel + "\",\"thread\":{\"id\":\"" + currentThread + "\"}}}");
                     }
                 } else if (line.contains("\"turn/start\"")) {
+                    if (mode.equals("lost-start-ack")) {
+                        java.nio.file.Files.writeString(Path.of("writer-pid"), Long.toString(ProcessHandle.current().pid()));
+                        System.out.close(); Thread.sleep(60_000); return;
+                    }
                     if (mode.equals("review") || mode.equals("compact") || mode.equals("observe")) System.exit(25);
                     Path reconnectMarker = Path.of(".rpc-reconnect-started");
                     if (mode.startsWith("reconnect") && java.nio.file.Files.exists(reconnectMarker)) System.exit(15);
@@ -138,7 +181,7 @@ public final class RpcFixture {
                     if (!line.contains("\"type\":\"" + expected + "\"")
                             || mode.equals("full") == line.contains("\"networkAccess\":false")) System.exit(9);
                     emit("{\"id\":" + id + ",\"result\":{\"turn\":{\"id\":\"turn-1\"}}}");
-                    if (mode.equals("interactive") || mode.equals("write-e2e")) {
+                    if (mode.equals("interactive") || mode.equals("write-e2e") || mode.equals("reconnect-approval")) {
                         emit("{\"id\":900,\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"threadId\":\"" + currentThread
                                 + "\",\"turnId\":\"turn-1\",\"itemId\":\"cmd\",\"command\":\"echo test\",\"startedAtMs\":0}}");
                         continue;

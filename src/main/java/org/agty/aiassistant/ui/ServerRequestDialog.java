@@ -39,26 +39,40 @@ final class ServerRequestDialog {
             var question = element.getAsJsonObject();
             var label = new JTextArea(text(question, "question")); label.setEditable(false); label.setLineWrap(true); label.setWrapStyleWord(true);
             form.add(label);
-            JComponent field;
-            if (question.has("isSecret") && question.get("isSecret").getAsBoolean()) field = new JPasswordField(40);
-            else if (question.has("options") && question.get("options").isJsonArray()) {
-                JComboBox<String> choices = new JComboBox<>();
-                for (var option : question.getAsJsonArray("options")) choices.addItem(text(option.getAsJsonObject(), "label"));
-                choices.setEditable(question.has("isOther") && question.get("isOther").getAsBoolean());
-                choices.setSelectedIndex(-1); field = choices;
-            } else field = new JTextField(40);
+            JComponent field = questionField(question);
             form.add(field); fields.put(text(question, "id"), field);
         }
-        if (JOptionPane.showConfirmDialog(null, form, "Вопросы Codex", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE) != JOptionPane.OK_OPTION) return null;
-        JsonObject answers = new JsonObject();
-        for (var pair : fields.entrySet()) {
-            String value = pair.getValue() instanceof JComboBox<?> combo ? Objects.toString(combo.getSelectedItem(), "")
-                    : ((JTextField) pair.getValue()).getText();
-            if (value.isBlank()) return null;
-            JsonArray values = new JsonArray(); values.add(value); JsonObject answer = new JsonObject(); answer.add("answers", values);
-            answers.add(pair.getKey(), answer);
+        try {
+            if (JOptionPane.showConfirmDialog(null, form, "Вопросы Codex", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE) != JOptionPane.OK_OPTION) return null;
+            JsonObject answers = new JsonObject();
+            for (var pair : fields.entrySet()) {
+                String value;
+                if (pair.getValue() instanceof JPasswordField password) {
+                    char[] secret = password.getPassword();
+                    try { value = new String(secret); } finally { Arrays.fill(secret, '\0'); }
+                } else value = pair.getValue() instanceof JComboBox<?> combo ? Objects.toString(combo.getSelectedItem(), "")
+                        : ((JTextField) pair.getValue()).getText();
+                if (value.isBlank()) return null;
+                JsonArray values = new JsonArray(); values.add(value); JsonObject answer = new JsonObject(); answer.add("answers", values);
+                answers.add(pair.getKey(), answer);
+            }
+            JsonObject result = new JsonObject(); result.add("answers", answers); return result;
+        } finally {
+            fields.values().forEach(field -> { if (field instanceof JPasswordField password) password.setText(""); });
         }
-        JsonObject result = new JsonObject(); result.add("answers", answers); return result;
+    }
+    static JComponent questionField(JsonObject question) {
+        if (question.has("isSecret") && question.get("isSecret").getAsBoolean()) return new JPasswordField(40);
+        if (question.has("options") && question.get("options").isJsonArray()) {
+            JComboBox<String> choices = new JComboBox<>();
+            // Model/tool supplied labels are data. Swing's default renderer interprets <html>
+            // and may fetch remote images before the user has answered the question.
+            choices.setRenderer(PlainText.renderer());
+            for (var option : question.getAsJsonArray("options")) choices.addItem(text(option.getAsJsonObject(), "label"));
+            choices.setEditable(question.has("isOther") && question.get("isOther").getAsBoolean());
+            choices.setSelectedIndex(-1); return choices;
+        }
+        return new JTextField(40);
     }
     private static JsonObject elicitation(Project project, JsonObject params) {
         String mode = text(params, "mode");

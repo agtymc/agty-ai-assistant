@@ -21,10 +21,10 @@ public record ChangeSet(List<FileChange> files) {
         }
 
         public String afterText(Set<Integer> selectedHunks) {
-            if (selectedHunks == null || selectedHunks.isEmpty()) return applyUnifiedDiff(beforeText, unifiedDiff);
+            if (selectedHunks == null || selectedHunks.isEmpty()) return StrictPatch.apply(beforeText, unifiedDiff);
             StringBuilder selected = new StringBuilder(fileHeader(unifiedDiff));
             for (Hunk hunk : hunks) if (selectedHunks.contains(hunk.id())) selected.append(hunk.text());
-            return applyUnifiedDiff(beforeText, selected.toString());
+            return StrictPatch.apply(beforeText, selected.toString());
         }
     }
 
@@ -90,22 +90,34 @@ public record ChangeSet(List<FileChange> files) {
 
     private static void flush(List<FileChange> files, String path, StringBuilder diff, Map<String, String> originalTexts) {
         if (path == null || path.isBlank() || diff.isEmpty()) return;
+        if (files.stream().anyMatch(file -> file.path().equals(path)))
+            throw new IllegalArgumentException("Patch содержит повторяющийся путь: " + path);
+        String patch = diff.toString();
+        for (String line : patch.split("\\n")) {
+            if (line.startsWith("@@ ")) break;
+            if (line.startsWith("rename ") || line.startsWith("copy ") || line.startsWith("deleted file mode ")
+                    || line.equals("+++ /dev/null") || line.startsWith("old mode ") || line.startsWith("new mode ")
+                    || line.startsWith("GIT binary patch") || line.startsWith("Binary files ")
+                    || line.startsWith("new file mode ") && !line.equals("new file mode 100644"))
+                throw new IllegalArgumentException("Ручной импорт поддерживает текстовые изменения и создание обычных файлов; операция не поддерживается: " + path);
+        }
         String original = originalTexts.getOrDefault(path, "");
-        files.add(new FileChange(path, sha256(original), original, diff.toString(), parseHunks(path, diff.toString())));
+        int firstId = files.stream().mapToInt(file -> file.hunks().size()).sum() + 1;
+        List<Hunk> hunks = parseHunks(path, patch, firstId);
+        if (hunks.isEmpty()) throw new IllegalArgumentException("Patch не содержит текстовых hunks: " + path);
+        files.add(new FileChange(path, sha256(original), original, patch, hunks));
     }
 
     private static String pathFromDiffHeader(String line) {
-        String[] parts = line.split(" ");
-        if (parts.length < 4) return "";
-        String path = parts[3];
-        if (path.startsWith("b/")) path = path.substring(2);
-        return path;
+        var matcher = java.util.regex.Pattern.compile("diff --git a/(.+) b/(.+)").matcher(line);
+        if (!matcher.matches() || !matcher.group(1).equals(matcher.group(2)))
+            throw new IllegalArgumentException("Неоднозначный путь или rename в ручном patch; используйте отдельные текстовые изменения.");
+        return matcher.group(2);
     }
 
-    private static List<Hunk> parseHunks(String path, String diff) {
+    private static List<Hunk> parseHunks(String path, String diff, int firstId) {
         List<Hunk> result = new ArrayList<>();
         String[] lines = diff.split("\n", -1);
-        int idBase = Math.abs(path.hashCode() * 31);
         for (int i = 0; i < lines.length; i++) {
             if (!lines[i].startsWith("@@ ")) continue;
             ParsedHunkHeader header = ParsedHunkHeader.parse(lines[i]);
@@ -116,7 +128,7 @@ public record ChangeSet(List<FileChange> files) {
                 i++;
             }
             i--;
-            result.add(new Hunk(idBase + result.size() + 1, path, header.oldStart(), header.newStart(), header.newCount(), text.toString()));
+            result.add(new Hunk(firstId + result.size(), path, header.oldStart(), header.newStart(), header.newCount(), text.toString()));
         }
         return List.copyOf(result);
     }
@@ -139,36 +151,6 @@ public record ChangeSet(List<FileChange> files) {
         }
     }
 
-    private static String applyUnifiedDiff(String original, String diff) {
-        List<String> originalLines = lines(original);
-        List<String> result = new ArrayList<>();
-        int originalIndex = 0;
-        String[] diffLines = diff.split("\n", -1);
-        for (int i = 0; i < diffLines.length; i++) {
-            String line = diffLines[i];
-            if (!line.startsWith("@@ ")) continue;
-            ParsedHunkHeader hunk = ParsedHunkHeader.parse(line);
-            while (originalIndex < hunk.oldStart() - 1 && originalIndex < originalLines.size())
-                result.add(originalLines.get(originalIndex++));
-            i++;
-            while (i < diffLines.length && !diffLines[i].startsWith("@@ ") && !diffLines[i].startsWith("diff --git ")) {
-                String hunkLine = diffLines[i];
-                if (hunkLine.startsWith(" ")) {
-                    if (originalIndex < originalLines.size()) result.add(originalLines.get(originalIndex));
-                    originalIndex++;
-                } else if (hunkLine.startsWith("-")) {
-                    originalIndex++;
-                } else if (hunkLine.startsWith("+")) {
-                    result.add(hunkLine.substring(1));
-                }
-                i++;
-            }
-            i--;
-        }
-        while (originalIndex < originalLines.size()) result.add(originalLines.get(originalIndex++));
-        return joinLines(result, original.endsWith("\n"));
-    }
-
     private record ParsedHunkHeader(int oldStart, int newStart, int newCount) {
         static ParsedHunkHeader parse(String header) {
             int minus = header.indexOf('-');
@@ -186,17 +168,4 @@ public record ChangeSet(List<FileChange> files) {
         }
     }
 
-    private static List<String> lines(String text) {
-        String[] split = text.split("\n", -1);
-        int count = split.length;
-        if (text.endsWith("\n")) count--;
-        List<String> result = new ArrayList<>();
-        for (int i = 0; i < count; i++) result.add(split[i]);
-        return result;
-    }
-
-    private static String joinLines(List<String> lines, boolean trailingNewline) {
-        String joined = String.join("\n", lines);
-        return trailingNewline ? joined + "\n" : joined;
-    }
 }

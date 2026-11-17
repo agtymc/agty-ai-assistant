@@ -35,7 +35,8 @@ public final class TaskRunner implements AutoCloseable {
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
     private final Map<String, Task> allTasks = new ConcurrentHashMap<>();
     private final Map<String, Task> tasks = new ConcurrentHashMap<>();
-    private final Map<Path, Semaphore> writers = new ConcurrentHashMap<>();
+    // One plugin classloader is shared by all IDEA projects. A cwd may be opened in more than one project.
+    private static final WorkspaceLocks WRITERS = new WorkspaceLocks();
     private final CopyOnWriteArrayList<Consumer<Task>> listeners = new CopyOnWriteArrayList<>();
     private final Consumer<Runnable> dispatch;
     private final Consumer<Task> beforeWrite;
@@ -61,8 +62,9 @@ public final class TaskRunner implements AutoCloseable {
     @FunctionalInterface public interface WorkspaceAction { void run() throws Exception; }
     public void withWorkspaceLock(Path directory, WorkspaceAction action) throws Exception {
         if (closed) throw new IllegalStateException("Проект закрыт.");
-        var lock = writers.computeIfAbsent(directory.toRealPath(), key -> new Semaphore(1, true));
-        lock.acquire(); try { if (closed) throw new IllegalStateException("Проект закрыт."); action.run(); } finally { lock.release(); }
+        try (var lock = WRITERS.acquire(directory.toRealPath(), () -> closed)) {
+            if (closed) throw new IllegalStateException("Проект закрыт."); action.run();
+        }
     }
     public boolean anyActive() { return tasks.values().stream().anyMatch(Task::active); }
     public List<com.google.gson.JsonObject> denials(String sessionId) {
@@ -107,13 +109,11 @@ public final class TaskRunner implements AutoCloseable {
         });
     }
     private void execute(Task task, Path directory, String prompt, boolean write) {
-        Semaphore gate = write ? writers.computeIfAbsent(directory, key -> new Semaphore(1, true)) : null;
-        boolean acquired = false;
+        WorkspaceLocks.Lease lease = null;
         try {
-            if (gate != null) {
-                while (!task.cancelled && !(acquired = gate.tryAcquire(100, TimeUnit.MILLISECONDS))) { }
-            }
+            if (write) lease = WRITERS.acquire(directory, () -> task.cancelled || closed);
             if (task.cancelled) throw new CancellationException();
+            new org.agty.aiassistant.security.ProjectAccessPolicy(directory).request(write).requireAllowed();
             dispatch.accept(() -> { if (!task.cancelled) { task.state = State.RUNNING; task.status = "Выполняется"; publish(task); } });
             if (write) {
                 var prepared = new CompletableFuture<Void>();
@@ -140,7 +140,7 @@ public final class TaskRunner implements AutoCloseable {
             collectChanges(task);
             dispatch.accept(() -> finish(task, task.cancelled || e instanceof CancellationException ? State.CANCELLED : State.FAILED,
                     task.cancelled ? "Остановлено" : "Ошибка: " + e.getMessage()));
-        } finally { if (acquired) gate.release(); }
+        } finally { if (lease != null) lease.close(); }
     }
     private void collectChanges(Task task) {
         if (task.workspace != null) {
@@ -212,9 +212,13 @@ public final class TaskRunner implements AutoCloseable {
         if (!closed && state == State.SUCCEEDED) {
             var queue = queued.get(task.session.id); var next = queue == null ? null : queue.poll();
             if (next != null) {
-                next.session.queuedMessages.remove(next.question);
-                try { start(next.session, next.factory.get(), next.directory, next.prompt, next.question, next.provider, next.write); }
-                catch (Exception e) { append(next.session, "Очередь", "Не удалось запустить сообщение: " + e.getMessage()); }
+                try {
+                    start(next.session, next.factory.get(), next.directory, next.prompt, next.question, next.provider, next.write);
+                    next.session.queuedMessages.remove(next.question);
+                } catch (Exception e) {
+                    queued.remove(task.session.id);
+                    append(next.session, "Очередь", "Не удалось запустить сообщение; подготовленные сообщения сохранены в /queue: " + e.getMessage());
+                }
             }
         } else if (state == State.FAILED || state == State.CANCELLED) {
             queued.remove(task.session.id);

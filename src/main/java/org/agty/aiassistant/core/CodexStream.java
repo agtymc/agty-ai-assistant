@@ -40,7 +40,7 @@ final class CodexStream {
             String rationale = p.has("review") ? string(p.getAsJsonObject("review"), "rationale") : "";
             if (retry != null) retry.addProperty("eventType", "guardianDenial");
             return new ChatEvent(ACTIVITY, string(p, "reviewId"), "Автоматическая проверка · " + status,
-                    rationale + (retry == null ? "" : "\n\nДля одного явного повтора после завершения turn используйте /approve."), true, "", retry);
+                    rationale + (retry == null ? "" : "\n\nПосле завершения turn /approve может добавить одобрение в контекст чата. Само действие команда не выполняет."), true, "", retry);
         }
         if (method.equals("thread/tokenUsage/updated")) return ChatEvent.simple(USAGE, p.get("tokenUsage").toString());
         if (method.equals("turn/completed")) {

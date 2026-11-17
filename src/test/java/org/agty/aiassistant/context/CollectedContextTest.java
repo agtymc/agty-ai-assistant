@@ -48,4 +48,17 @@ class CollectedContextTest {
         assertEquals("visible.txt", context.items().getFirst().path());
         assertTrue(context.preview().contains(".aiignore"));
     }
+
+    @Test void queuedPromptIsNotSentAfterContextBecomesExcluded() throws Exception {
+        Files.writeString(root.resolve("source.txt"), "private");
+        var sent = new java.util.concurrent.atomic.AtomicBoolean();
+        var delegate = new org.agty.aiassistant.chat.ChatProvider.Request() {
+            public void run(Path directory, String prompt, java.util.function.Consumer<org.agty.aiassistant.chat.ChatEvent> events) { sent.set(true); }
+            public void cancel() { }
+        };
+        var request = ContextGuard.protect(delegate, List.of(new ContextItem("Source", "source.txt", 1, 1, "private")));
+        Files.writeString(root.resolve(".aiignore"), "/source.txt\n");
+        assertThrows(IllegalStateException.class, () -> request.run(root, "private", event -> { }));
+        assertFalse(sent.get());
+    }
 }

@@ -12,7 +12,7 @@ public final class WorktreeManager {
     private static String run(Path root, String... args) throws IOException {
         List<String> command = new ArrayList<>(List.of("git")); command.addAll(List.of(args));
         var process = new ProcessBuilder(command).directory(root.toFile()).redirectErrorStream(true).start();
-        var output = CompletableFuture.supplyAsync(() -> { try { return new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8); } catch (IOException e) { throw new CompletionException(e); } });
+        var output = CompletableFuture.supplyAsync(() -> { try { byte[] bytes = process.getInputStream().readNBytes(64 * 1024 * 1024 + 1); if (bytes.length > 64 * 1024 * 1024) throw new IOException("Вывод Git worktree превышает 64 MiB."); return new String(bytes, StandardCharsets.UTF_8); } catch (IOException e) { throw new CompletionException(e); } });
         try {
             if (!process.waitFor(30, TimeUnit.SECONDS)) { process.destroyForcibly(); throw new IOException("Git worktree превысил 30 секунд."); }
             String text = output.get(5, TimeUnit.SECONDS); if (process.exitValue() != 0) throw new IOException(text); return text;

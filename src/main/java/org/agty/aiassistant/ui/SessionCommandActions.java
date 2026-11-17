@@ -56,7 +56,7 @@ final class SessionCommandActions {
     }
     private void rpc(String method, JsonObject params, Consumer<JsonObject> result) {
         var target = current();
-        boolean mutation = Set.of("thread/fork", "thread/delete", "thread/archive").contains(method);
+        boolean mutation = Set.of("thread/fork", "thread/delete", "thread/archive", "thread/approveGuardianDeniedAction").contains(method);
         if (mutation && !service().reserve(target.id)) throw new IllegalStateException("Операция с чатом ещё выполняется.");
         Path root = directory(); boolean experimental = host.sessions.get().experimentalApi;
         String binary = CodexSettings.getInstance().getExecutablePath(); host.status.accept("Выполняется " + method + "…");
@@ -129,15 +129,32 @@ final class SessionCommandActions {
                 case "/export" -> {
                     JFileChooser chooser = new JFileChooser(); chooser.setSelectedFile(new java.io.File("codex-chat.md"));
                     if (chooser.showSaveDialog(null) != JFileChooser.APPROVE_OPTION) return true;
-                    Path output = chooser.getSelectedFile().toPath(); if (Files.exists(output) && !confirm("Перезаписать " + output + "?")) return true;
+                    Path output = chooser.getSelectedFile().toPath();
+                    var export = new org.agty.aiassistant.security.SafeExport(output);
+                    requireSavedExportDestination(export.target());
+                    if (Files.exists(output, LinkOption.NOFOLLOW_LINKS) && !confirm("Перезаписать " + output + "?")) return true;
                     var messages = new ArrayList<>(current().localArchive);
                     messages.addAll(current().messages);
                     ApplicationManager.getApplication().executeOnPooledThread(() -> {
                         try {
-                            StringBuilder markdown = new StringBuilder();
-                            for (var message : messages) markdown.append("## ").append(message.title).append("\n\n").append(org.agty.aiassistant.history.MessageArtifacts.getInstance().text(message)).append("\n\n");
-                            Files.writeString(output, markdown); ApplicationManager.getApplication().invokeLater(() -> host.status.accept("Экспортировано: " + output));
-                        } catch (Exception e) { ApplicationManager.getApplication().invokeLater(() -> host.status.accept(e.getMessage())); }
+                            export.stage(writer -> {
+                                for (var message : messages) writer.append("## ").append(message.title).append("\n\n")
+                                        .append(org.agty.aiassistant.history.MessageArtifacts.getInstance().text(message)).append("\n\n");
+                            });
+                            ApplicationManager.getApplication().invokeLater(() -> {
+                                try (export) {
+                                    if (host.project.isDisposed()) return;
+                                    WriteAction.run(() -> {
+                                        requireSavedExportDestination(export.target()); export.commit();
+                                        com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByNioFile(export.target());
+                                    });
+                                    host.status.accept("Экспортировано: " + output);
+                                } catch (Exception e) { host.status.accept("Экспорт не выполнен: " + e.getMessage()); }
+                            });
+                        } catch (Exception e) {
+                            try { export.close(); } catch (Exception cleanup) { e.addSuppressed(cleanup); }
+                            ApplicationManager.getApplication().invokeLater(() -> host.status.accept("Экспорт не выполнен: " + e.getMessage()));
+                        }
                     });
                 }
                 case "/pwd" -> message("Каталог", directory().toString());
@@ -183,14 +200,19 @@ final class SessionCommandActions {
                 case "/approve" -> {
                     idle(); thread(); experimental();
                     var denials = service().runner().denials(current().id);
-                    if (denials.isEmpty()) throw new IllegalStateException("В этом чате нет сохранённых отказов auto-review для повтора.");
+                    if (denials.isEmpty()) throw new IllegalStateException("В этом чате нет сохранённых отказов auto-review для одобрения.");
                     String[] names = denials.stream().map(event -> "Отказ · " + value(event, "id") + " · " + inventory(event.get("action"))).toArray(String[]::new);
-                    String selected = (String) JOptionPane.showInputDialog(null, "Выберите отклонённую операцию для одного явного повтора", "Повтор auto-review", JOptionPane.QUESTION_MESSAGE, null, names, names[0]);
+                    String selected = (String) PlainText.choose(null, "Выберите действие для одобрения в контексте чата", "Одобрение auto-review", JOptionPane.QUESTION_MESSAGE, names, names[0]);
                     if (selected == null) return true; int index = java.util.Arrays.asList(names).indexOf(selected); var event = denials.get(index);
-                    if (!confirm("Повторить только выбранную ранее отклонённую операцию?\n" + inventory(event.get("action")) + "\nРежим доступа и общие правила не будут повышены.")) return true;
-                    var target = current(); Path root = directory(); var provider = new CodexChatProvider(CodexSettings.getInstance().getExecutablePath(), service().connections(), true);
-                    service().runner().start(target, provider.retryRequest(target.remoteId(), event), root, "", "Явный повтор операции auto-review", "Codex", true);
+                    if (!confirm("Записать одобрение выбранного действия в нативный контекст этого чата?\n" + inventory(event.get("action"))
+                            + "\nCodex 0.169.0 не выполняет действие этой командой. Одобрение будет доступно модели при следующих запросах в этом чате; оно не является одноразовым разрешением."
+                            + "\nДля продолжения вы отдельно отправляете запрос. Общий режим доступа не изменяется.")) return true;
+                    var target = current(); var params = GuardianRetry.approvalParams(target.remoteId(), event);
+                    if (service().reserved(target.id)) throw new IllegalStateException("Операция с чатом ещё выполняется.");
+                    // A lost acknowledgement must not invite resubmitting the same approval.
                     service().runner().consumeDenial(target.id, value(event, "id"));
+                    rpc("thread/approveGuardianDeniedAction", params, result -> message("Одобрение передано Codex",
+                            "Одобрение выбранного действия добавлено в контекст чата. Команда не запускала выполнение и не подтверждает, что файлы изменены. Для продолжения отправьте отдельный запрос; одобрение сохраняется в нативном контексте."));
                 }
                 case "/compact" -> {
                     idle(); thread(); Path root = directory(); var target = current();
@@ -206,7 +228,7 @@ final class SessionCommandActions {
                     if (current().queuedMessages.isEmpty()) message("Очередь", "Подготовленных сообщений нет.");
                     else {
                         String[] choices = current().queuedMessages.toArray(String[]::new);
-                        String chosen = (String) JOptionPane.showInputDialog(null, "Выберите сообщение для вставки в черновик", "Очередь", JOptionPane.QUESTION_MESSAGE, null, choices, choices[0]);
+                        String chosen = (String) PlainText.choose(null, "Выберите сообщение для вставки в черновик", "Очередь", JOptionPane.QUESTION_MESSAGE, choices, choices[0]);
                         if (chosen != null) host.draft.accept(chosen);
                     }
                 }
@@ -230,7 +252,7 @@ final class SessionCommandActions {
                 case "/memories" -> memories(argument);
                 case "/import" -> importConfiguration();
                 case "/feedback" -> {
-                    String diagnostics = "AGTY AI Assistant 0.14.0\nIDEA 253\nCLI: " + CodexCompatibility.observed(CodexSettings.getInstance().getExecutablePath())
+                    String diagnostics = "AGTY AI Assistant 0.14.1\nIDEA 253\nCLI: " + CodexCompatibility.observed(CodexSettings.getInstance().getExecutablePath())
                             + "\nOS: " + System.getProperty("os.name") + "\nJava: " + System.getProperty("java.version")
                             + "\nTask: " + (service().runner().task(current().id) == null ? "none" : service().runner().task(current().id).state);
                     host.draft.accept("Диагностика для отчёта об ошибке:\n" + diagnostics + "\nШаги воспроизведения: ");
@@ -302,7 +324,7 @@ final class SessionCommandActions {
             if (!host.live.getAsBoolean() || responseTarget != current()) { message("Агенты", inventory(result)); return; }
             List<Agent> agents = new ArrayList<>(); for (var thread : result.getAsJsonArray("data")) agents.add(new Agent(thread.getAsJsonObject()));
             if (agents.isEmpty()) { message("Агенты", "Для выбранной задачи нет доступных подагентов. Их наличие зависит от запуска и конфигурации Codex."); return; }
-            Agent selected = (Agent) JOptionPane.showInputDialog(null, "Выберите агента для открытия чата и наблюдения", "Агенты Codex", JOptionPane.QUESTION_MESSAGE, null, agents.toArray(), agents.getFirst());
+            Agent selected = (Agent) PlainText.choose(null, "Выберите агента для открытия чата и наблюдения", "Агенты Codex", JOptionPane.QUESTION_MESSAGE, agents.toArray(), agents.getFirst());
             if (selected == null) return;
             String id = value(selected.thread, "id"); UUID.fromString(id);
             var session = host.sessions.get().sessions.stream().filter(candidate -> candidate.remoteId().equals(id)).findFirst().orElse(null);
@@ -330,8 +352,8 @@ final class SessionCommandActions {
                     int choice = Messages.showDialog(host.project, "Открыть существующий worktree или создать отдельный checkout и новую ветку?",
                             "Git worktree", new String[]{"Открыть", "Создать", "Отмена"}, 2, Messages.getQuestionIcon());
                     if (choice == 0 && !worktrees.isEmpty()) {
-                        var selected = (org.agty.aiassistant.changes.WorktreeManager.Worktree) JOptionPane.showInputDialog(null, "Выберите worktree", "Git worktree",
-                                JOptionPane.QUESTION_MESSAGE, null, worktrees.toArray(), worktrees.getFirst());
+                        var selected = (org.agty.aiassistant.changes.WorktreeManager.Worktree) PlainText.choose(null, "Выберите worktree", "Git worktree",
+                                JOptionPane.QUESTION_MESSAGE, worktrees.toArray(), worktrees.getFirst());
                         if (selected != null) openWorktree(original, selected.directory());
                     } else if (choice == 1) {
                         String branch = Messages.showInputDialog(host.project, "Имя новой ветки", "Git worktree", null); if (branch == null) return;
@@ -369,7 +391,7 @@ final class SessionCommandActions {
                     if (command.equals("/speed")) {
                         List<CodexModels.ServiceTier> tiers = new ArrayList<>(); tiers.add(new CodexModels.ServiceTier("default", "Стандартная скорость", "Стандартная скорость этого turn")); tiers.addAll(metadata.serviceTiers());
                         CodexModels.ServiceTier selected = argument.isBlank()
-                                ? (CodexModels.ServiceTier) JOptionPane.showInputDialog(null, "Скорость следующего обычного turn; может влиять на стоимость", "Скорость Codex", JOptionPane.QUESTION_MESSAGE, null, tiers.toArray(), tiers.getFirst())
+                                ? (CodexModels.ServiceTier) PlainText.choose(null, "Скорость следующего обычного turn; может влиять на стоимость", "Скорость Codex", JOptionPane.QUESTION_MESSAGE, tiers.toArray(), tiers.getFirst())
                                 : tiers.stream().filter(t -> t.id().equals(argument)).findFirst().orElse(null);
                         if (selected == null) { if (!argument.isBlank()) host.status.accept("Tier не предоставлен текущему аккаунту/модели."); return; }
                         target.serviceTier = selected.id(); host.refresh.run();
@@ -379,7 +401,7 @@ final class SessionCommandActions {
                         if (programs == null) { host.status.accept("Каталог не предоставил сведения о доступе к Daybreak."); return; }
                         String[] choices = programs.stream().filter(p -> !p.equals("standard")).toArray(String[]::new);
                         if (choices.length == 0) { host.status.accept("Daybreak не предоставлен текущему аккаунту и модели."); return; }
-                        String selected = (String) JOptionPane.showInputDialog(null, "Выберите предоставленный аккаунту режим. Sandbox и разрешения не изменятся.", "Daybreak", JOptionPane.QUESTION_MESSAGE, null, choices, choices[0]);
+                        String selected = (String) PlainText.choose(null, "Выберите предоставленный аккаунту режим. Sandbox и разрешения не изменятся.", "Daybreak", JOptionPane.QUESTION_MESSAGE, choices, choices[0]);
                         if (selected != null) { target.cyberAccessProgram = selected; host.refresh.run(); }
                     }
                 });
@@ -391,6 +413,17 @@ final class SessionCommandActions {
         JsonObject params = new JsonObject(), edit = new JsonObject(); edit.addProperty("keyPath", key); edit.addProperty("mergeStrategy", "upsert"); edit.add("value", value);
         JsonArray edits = new JsonArray(); edits.add(edit); params.add("edits", edits); params.addProperty("reloadUserConfig", true);
         rpc("config/batchWrite", params, result -> host.status.accept("Общая настройка Codex сохранена"));
+    }
+
+    static void requireSavedExportDestination(Path target) throws java.io.IOException {
+        target = org.agty.aiassistant.changes.WorkspaceChanges.canonical(target);
+        var manager = com.intellij.openapi.fileEditor.FileDocumentManager.getInstance();
+        for (var document : manager.getUnsavedDocuments()) {
+            var file = manager.getFile(document);
+            if (file != null && file.isInLocalFileSystem()
+                    && org.agty.aiassistant.changes.WorkspaceChanges.canonical(file.toNioPath()).equals(target))
+                throw new java.io.IOException("В файле назначения есть несохранённые правки. Сохраните их или выберите другой файл.");
+        }
     }
     private void apps(String argument) {
         String[] parts = argument.split("\\s+", 2);
@@ -418,7 +451,7 @@ final class SessionCommandActions {
         String name = argument;
         if (name.isBlank()) {
             if (presets.isEmpty()) { message("Presets", "Сохраните текст: /presets save имя текст. Вставка preset не выполняет команды."); return; }
-            name = (String) JOptionPane.showInputDialog(null, "Выберите preset для вставки в черновик", "Presets", JOptionPane.QUESTION_MESSAGE, null, presets.keySet().toArray(), presets.keySet().iterator().next());
+            name = (String) PlainText.choose(null, "Выберите preset для вставки в черновик", "Presets", JOptionPane.QUESTION_MESSAGE, presets.keySet().toArray(), presets.keySet().iterator().next());
         }
         if (name != null) { String text = presets.get(name); if (text == null) throw new IllegalStateException("Preset не найден."); host.draft.accept(text); }
     }
@@ -449,7 +482,7 @@ final class SessionCommandActions {
             List<Hook> hooks = new ArrayList<>();
             if (result.has("data")) for (var entry : result.getAsJsonArray("data")) if (entry.getAsJsonObject().has("hooks")) for (var hook : entry.getAsJsonObject().getAsJsonArray("hooks")) hooks.add(new Hook(hook.getAsJsonObject()));
             if (hooks.isEmpty()) { message("Hooks", inventory(result)); return; }
-            Hook selected = (Hook) JOptionPane.showInputDialog(null, "Выберите hook для просмотра и управления", "Hooks", JOptionPane.QUESTION_MESSAGE, null, hooks.toArray(), hooks.getFirst());
+            Hook selected = (Hook) PlainText.choose(null, "Выберите hook для просмотра и управления", "Hooks", JOptionPane.QUESTION_MESSAGE, hooks.toArray(), hooks.getFirst());
             if (selected == null) return; var hook = selected.item;
             int action = Messages.showDialog(host.project, "Hook: " + value(hook, "eventName") + "\nИсточник: " + value(hook, "sourcePath")
                             + "\nКоманда: " + value(hook, "command") + "\nИнструмент: " + value(hook, "server") + " / " + value(hook, "tool")
@@ -493,8 +526,8 @@ final class SessionCommandActions {
                 if (!host.live.getAsBoolean() || responseTarget != current()) { message("Плагины Codex", "Каталог загружен. Вернитесь в исходный чат и повторите установку для выбора источника."); return; }
                 var candidates = PluginInstallSelection.matching(catalog, parts[1]);
                 if (candidates.isEmpty()) throw new IllegalStateException("Плагин не найден в предоставленных Codex каталогах. Откройте /plugins и используйте имя или ID из списка.");
-                var selected = candidates.size() == 1 ? candidates.getFirst() : (PluginInstallSelection) JOptionPane.showInputDialog(null,
-                        "Выберите источник установки", "Каталог плагинов Codex", JOptionPane.QUESTION_MESSAGE, null, candidates.toArray(), candidates.getFirst());
+                var selected = candidates.size() == 1 ? candidates.getFirst() : (PluginInstallSelection) PlainText.choose(null,
+                        "Выберите источник установки", "Каталог плагинов Codex", JOptionPane.QUESTION_MESSAGE, candidates.toArray(), candidates.getFirst());
                 if (selected == null) return;
                 var install = selected.params();
                 if (!confirm("Установить " + selected + "?\nИсточник: " + (selected.localPath().isBlank() ? selected.marketplace() : selected.localPath())

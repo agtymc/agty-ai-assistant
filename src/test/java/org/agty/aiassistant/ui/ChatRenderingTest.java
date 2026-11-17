@@ -13,6 +13,29 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ChatRenderingTest {
+    @Test void delayedContextFromAnotherChatCannotOverwriteSameNamedFileContext() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            var store = com.intellij.openapi.application.ApplicationManager.getApplication().getService(org.agty.aiassistant.chat.ChatSessions.class);
+            var previous = store.getState().projects.remove(projectKey());
+            var panel = new AiAssistantChatPanel(project, () -> { throw new AssertionError("No model call"); });
+            try {
+                var sessions = store.project(projectKey()); var first = sessions.current(); var second = sessions.create();
+                panel.selectSessionById(second.id);
+                var own = new org.agty.aiassistant.context.ContextItem("Git diff", "same.txt", 0, 0, "second chat data");
+                panel.addCollectedContext(second, new org.agty.aiassistant.context.CollectedContext(java.util.List.of(own), java.util.List.of()));
+                var stale = new org.agty.aiassistant.context.ContextItem("Git diff", "same.txt", 0, 0, "private first chat data");
+                panel.addCollectedContext(first, new org.agty.aiassistant.context.CollectedContext(java.util.List.of(stale), java.util.List.of()));
+                assertEquals(1, second.contextSources.size());
+                assertEquals("second chat data", second.contextSources.getFirst().text);
+                var staged = new org.agty.aiassistant.context.ContextItem("Git diff staged", "same.txt", 0, 0, "staged second chat data");
+                panel.addCollectedContext(second, new org.agty.aiassistant.context.CollectedContext(java.util.List.of(staged), java.util.List.of()));
+                assertEquals(2, second.contextSources.size(), "Distinct staged/unstaged sources for the same path must coexist");
+            } finally {
+                panel.dispose(); store.getState().projects.remove(projectKey());
+                if (previous != null) store.getState().projects.put(projectKey(), previous);
+            }
+        });
+    }
     private static String projectKey() {
         return org.agty.aiassistant.chat.ProjectIdentity.getInstance(project).stableId(project);
     }

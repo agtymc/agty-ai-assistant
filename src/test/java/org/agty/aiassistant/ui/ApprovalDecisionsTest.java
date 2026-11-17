@@ -3,6 +3,13 @@ import com.google.gson.*;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 class ApprovalDecisionsTest {
+    @Test void malformedDecisionListDoesNotFallBackToPermissionGrants() {
+        for (String value : java.util.List.of("true", "\"accept\"", "{}")) {
+            var params = JsonParser.parseString("{\"availableDecisions\":" + value + "}").getAsJsonObject();
+            assertTrue(ApprovalDecisions.choices(params, true).isEmpty());
+        }
+        assertEquals(4, ApprovalDecisions.choices(JsonParser.parseString("{\"availableDecisions\":null}").getAsJsonObject(), true).size());
+    }
     @Test void neverOffersDecisionsExcludedByServerAndPreservesExactPersistentRule() {
         var params = JsonParser.parseString("""
             {"availableDecisions":["decline",{"applyNetworkPolicyAmendment":{"network_policy_amendment":{"host":"example.org","action":"deny"}}}],

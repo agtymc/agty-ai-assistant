@@ -29,7 +29,7 @@ public final class CodexConfigurable implements Configurable {
         path.addBrowseFolderListener(null, new FileChooserDescriptor(true, false, false, false, false, false)
                 .withTitle("Выберите исполняемый файл Codex"));
         check = new JButton("Проверить Codex");
-        result = new JLabel("Проверка запускает только codex --version.");
+        result = org.agty.aiassistant.ui.PlainText.label("Проверка запускает только codex --version.");
         check.addActionListener(e -> probe());
         panel = FormBuilder.createFormBuilder()
                 .addLabeledComponent("Путь к бинарнику Codex:", path)
